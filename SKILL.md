@@ -265,7 +265,7 @@ python3 "$VT_HOME/scripts/transcript.py" "<URL或本地路径>"
 | 返回整段文本无分段 | 预期行为:脚本按句号切句 + 字数比例估算时间戳;整理优化版阶段按口述编号最终对齐 |
 | 抖音图文笔记(note 链接) | 提示用户不支持图文,仅支持视频 |
 | 平台前端改版导致抓取失败 | 看 `$VT_HOME/FALLBACK.md` 走人工兜底 |
-| 微信视频号提示缺少 video-download | 先安装 `video-download` skill,或把它放在与 `video-transcript` 同级的 skill 目录 |
+| 微信视频号提示缺少 video-download | 重跑 `bash "$VT_HOME/install.sh"` 自动装配套 skill,或手动 `npx skills add Backtthefuture/video-download -a claude-code -g -y` |
 | 微信视频号提示缺少 SPH_COOKIE/YUANBAO_COOKIE | 当前使用的是 `WECHAT_RESOLVER=cookie`;可在 `video-download/.env` 配置 Cookie,或明确改为 `WECHAT_RESOLVER=public-worker` |
 
 视频号解析方式由 `video-download/.env` 决定。当前如果选择公共 Worker,写入:

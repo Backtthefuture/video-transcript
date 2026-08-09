@@ -19,7 +19,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Backtthefuture/video-transcr
 2. 检查/安装 ffmpeg（必要时连 Homebrew 一起装）
 3. 装 `yt-dlp` + `playwright` + Chromium 浏览器引擎（~300MB）
 4. 安装 FunASR 转录引擎（SenseVoice-Small，约 234M）
-5. 跑 `--doctor` 自检
+5. **自动安装配套 skill `video-download`**（微信视频号下载必需，默认 `public-worker` 解析，无需 Cookie）
+6. 跑 `--doctor` 自检
 
 完成后在 Claude Code / Codex 里就能用 `/video-transcript <视频链接>`。
 
@@ -62,7 +63,7 @@ pip3 install --break-system-packages funasr torchaudio
 - 微信视频号：`https://weixin.qq.com/sph/xxx` 或 `channels.weixin.qq.com/...`
 - 本地文件：`/path/to/video.mp4`
 
-微信视频号转录依赖 `video-download` 先把视频保存为本地 MP4，再交给本 skill 转录。若只下载视频号视频，请直接走 `video-download`。
+微信视频号转录依赖配套 skill `video-download`（已由 install.sh 自动安装，默认 `public-worker` 解析，无需 Cookie）。若只下载视频号视频，请直接走 `video-download`。
 
 ### 终端直接跑
 
@@ -148,7 +149,7 @@ python3 ~/.claude/skills/video-transcript/scripts/transcript.py --doctor
 | funasr 未安装 | `pip install funasr torchaudio` |
 | 首次运行联网失败 | 首次需联网下载模型（约 234M）；国内可重试或检查网络 |
 | 抖音/小红书抓不到视频 | 平台前端可能改版，参考 `FALLBACK.md` 手动方案 |
-| 微信视频号提示找不到 `video-download` | 先安装 `video-download` skill，或把它放在与 `video-transcript` 同级的 skill 目录 |
+| 微信视频号提示找不到 `video-download` | 重跑 `bash ~/.claude/skills/video-transcript/install.sh` 自动安装配套 skill，或手动 `npx skills add Backtthefuture/video-download` |
 | B 站 yt-dlp 报 412 | 正常，已自动 fallback 到 headless 浏览器，不用管 |
 | 抖音图文笔记（note 链接） | 不支持图文，仅支持视频 |
 | `playwright` 报 chromium 找不到 | `python3 -m playwright install chromium` |

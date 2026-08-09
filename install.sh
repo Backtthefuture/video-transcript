@@ -36,12 +36,13 @@ sep
 echo "  把 B 站/抖音/小红书/YouTube 视频自动转成逐字稿"
 echo "  全程在你电脑后台跑,不弹窗、不要登录视频网站"
 echo ""
-echo "  接下来 5 步,大约 5-10 分钟:"
-echo "    [1/5] 检查/安装 ffmpeg(视频处理)"
-echo "    [2/5] 检查 Python 3"
-echo "    [3/5] 装 Python 工具(yt-dlp + playwright)"
-echo "    [4/5] 下载浏览器引擎(Chromium, ~300MB)"
-echo "    [5/5] 安装 FunASR 转录引擎(纯本地,无需 API Key)"
+echo "  接下来 6 步,大约 5-10 分钟:"
+echo "    [1/6] 检查/安装 ffmpeg(视频处理)"
+echo "    [2/6] 检查 Python 3"
+echo "    [3/6] 装 Python 工具(yt-dlp + playwright)"
+echo "    [4/6] 下载浏览器引擎(Chromium, ~300MB)"
+echo "    [5/6] 安装 FunASR 转录引擎(纯本地,无需 API Key)"
+echo "    [6/6] 安装配套 skill video-download(微信视频号必需)"
 bar
 echo ""
 read -r -p "  按回车继续 / Ctrl+C 取消..." _ < /dev/tty || true
@@ -124,6 +125,41 @@ cat > "$ENV_FILE" <<EOF
 EOF
 chmod 600 "$ENV_FILE"
 ok "已写入 $ENV_FILE (chmod 600,只有你能读)"
+
+# ── Step 6: 配套 skill video-download(微信视频号必需) ──
+step 6 6 "安装配套 skill video-download(微信视频号下载)"
+sep
+VD_TARGET="$HOME/.claude/skills/video-download"
+if [ -d "$VD_TARGET" ] && [ -f "$VD_TARGET/scripts/download_video.py" ]; then
+  ok "video-download 已存在: $VD_TARGET"
+else
+  info "拉取 video-download skill(抖音/小红书/B站/YouTube/微信视频号 → 本地 MP4)..."
+  if command -v npx >/dev/null 2>&1 && npx -y skills add Backtthefuture/video-download -a claude-code -g -y 2>&1; then
+    :
+  elif git clone --depth=1 https://github.com/Backtthefuture/video-download.git "$VD_TARGET" 2>&1; then
+    rm -rf "$VD_TARGET/.git"
+  else
+    warn "video-download 拉取失败,可稍后手动安装(仅影响微信视频号转录)"
+  fi
+  if [ -d "$VD_TARGET" ] && [ -f "$VD_TARGET/scripts/download_video.py" ]; then
+    ok "video-download 就绪"
+  fi
+fi
+
+# 写 video-download 的最小 .env(默认 public-worker,无需 Cookie)
+if [ -d "$VD_TARGET" ]; then
+  VD_ENV="$VD_TARGET/.env"
+  if [ ! -f "$VD_ENV" ]; then
+    cat > "$VD_ENV" <<'EOF'
+# video-download skill 配置
+# public-worker: 走公共 Worker 解析视频号,无需本机 Cookie(链接会发给第三方)
+# cookie: 用本机元宝 Cookie,隐私更好,需配置 SPH_COOKIE/YUANBAO_COOKIE
+WECHAT_RESOLVER=public-worker
+EOF
+    chmod 600 "$VD_ENV"
+    ok "已写入 $VD_ENV (WECHAT_RESOLVER=public-worker)"
+  fi
+fi
 
 # ── 完成 + 自检 ─────────────────────────────────────────
 echo ""
