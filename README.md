@@ -1,5 +1,7 @@
 # 视频文案提取（video-transcript）Skill
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 把 微信视频号 / B站 / 抖音 / 小红书 / YouTube / 本地视频 自动转成**逐字稿文案**（保留口语词、网络梗、停顿）。
 
 全程在你电脑**本地离线**跑：下载 → 提音频 → **FunASR（SenseVoice-Small）**转录。不需要任何 API Key、不上传视频、不弹窗、不要登录视频网站（模型首次下载后全离线）。
@@ -233,3 +235,9 @@ python3 ~/.claude/skills/video-transcript/scripts/transcript.py --doctor
 1. 跑 `--doctor`
 2. 看 `FALLBACK.md` 手动绕开
 3. 提 issue 附上 URL + 报错日志
+
+---
+
+## 📄 License
+
+[MIT](LICENSE) — 随便用，欢迎 Star ⭐ 和 PR。
