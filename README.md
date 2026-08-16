@@ -67,6 +67,19 @@ pip3 install --break-system-packages funasr torchaudio
 
 微信视频号转录依赖配套 skill `video-download`（已由 install.sh 自动安装，默认 `public-worker` 解析，无需 Cookie）。若只下载视频号视频，请直接走 `video-download`。
 
+#### 微信视频号：元宝登录态解析（推荐）
+
+公共 Worker（`sph.litao.workers.dev`）已失效（返回微信错误码 1042），`download_video.py` 会自动回退到**元宝登录态解析**：复用 `~/.workbuddy/credentials/yuanbao_state.json` 的腾讯元宝持久化登录态，走腾讯官方接口，不导出 Cookie、不依赖第三方服务。
+
+- install.sh 第 7 步会引导**微信扫码一次**建立登录态
+- 手动维护：
+
+```bash
+python3 ~/.workbuddy/skills/video-transcript/scripts/sph_resolver.py --login   # 扫码建立/更新登录态
+python3 ~/.workbuddy/skills/video-transcript/scripts/sph_resolver.py --check   # 检查登录态
+python3 ~/.workbuddy/skills/video-transcript/scripts/sph_resolver.py "<链接>"   # 直接解析(输出 JSON)
+```
+
 ### 终端直接跑
 
 ```bash

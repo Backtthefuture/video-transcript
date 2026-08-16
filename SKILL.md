@@ -266,12 +266,18 @@ python3 "$VT_HOME/scripts/transcript.py" "<URL或本地路径>"
 | 抖音图文笔记(note 链接) | 提示用户不支持图文,仅支持视频 |
 | 平台前端改版导致抓取失败 | 看 `$VT_HOME/FALLBACK.md` 走人工兜底 |
 | 微信视频号提示缺少 video-download | 重跑 `bash "$VT_HOME/install.sh"` 自动装配套 skill,或手动 `npx skills add Backtthefuture/video-download -a claude-code -g -y` |
-| 微信视频号提示缺少 SPH_COOKIE/YUANBAO_COOKIE | 当前使用的是 `WECHAT_RESOLVER=cookie`;可在 `video-download/.env` 配置 Cookie,或明确改为 `WECHAT_RESOLVER=public-worker` |
+| 微信视频号提示缺少 SPH_COOKIE/YUANBAO_COOKIE | 该提示只在 `WECHAT_RESOLVER=cookie` 时出现;默认已改为 `yuanbao-login`,无需配 Cookie |
+| 微信视频号公共 Worker 失效(错误码 1042) | 已自动回退到**元宝登录态解析**(推荐),无需处理;见下方说明 |
 
-视频号解析方式由 `video-download/.env` 决定。当前如果选择公共 Worker,写入:
+视频号解析方式由 `video-download/.env` 决定。**默认即元宝登录态(`yuanbao-login`),开箱即用**。如需显式配置:
 
 ```env
-WECHAT_RESOLVER=public-worker
+# 默认(推荐):复用本地元宝登录态,免 Cookie、免第三方
+WECHAT_RESOLVER=yuanbao-login
+# 备选:公共 Worker(失效时自动回退元宝)
+# WECHAT_RESOLVER=public-worker
+# 备选:手动 Cookie
+# WECHAT_RESOLVER=cookie
 ```
 
 也可临时显式覆盖:
@@ -279,6 +285,25 @@ WECHAT_RESOLVER=public-worker
 ```bash
 VIDEO_DOWNLOAD_WECHAT_RESOLVER=public-worker python3 "$VT_HOME/scripts/transcript.py" "https://weixin.qq.com/sph/xxx"
 ```
+
+### 微信视频号:元宝登录态解析(默认)
+
+公共 Worker(`sph.litao.workers.dev`)已失效(返回微信错误码 1042)。`download_video.py` 现在**默认走元宝登录态解析**(`WECHAT_RESOLVER=yuanbao-login`):复用 `~/.workbuddy/credentials/yuanbao_state.json` 的持久化登录态,走腾讯官方接口,不导出 Cookie、不依赖第三方服务;配置为 `public-worker` 时失败也会自动回退到这条链路。
+
+安装时(`install.sh`)会自动引导扫码建立登录态;也可手动维护:
+
+```bash
+# 建立/更新登录态(弹出浏览器,微信扫码一次)
+python3 "$VT_HOME/scripts/sph_resolver.py" --login
+
+# 检查登录态是否有效
+python3 "$VT_HOME/scripts/sph_resolver.py" --check
+
+# 直接解析视频号链接(输出 JSON,含 direct_url)
+python3 "$VT_HOME/scripts/sph_resolver.py" "https://weixin.qq.com/sph/xxx"
+```
+
+登录态有效期与微信授权一致,过期后重新 `--login` 扫码即可。
 
 ## 命令行选项
 
