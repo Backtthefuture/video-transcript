@@ -1,15 +1,20 @@
 ---
 name: 视频文案提取
 description: |
-  视频文案提取专家(FunASR SenseVoice-Small 中文转录,CPU 高速,自带标点,无需 API Key)。支持 微信视频号 / 抖音 / 小红书 / B站 / YouTube / 本地视频,把视频人声一键转成"分段小标题 + 段落级时间戳"的逐字稿文案。**核心交付为「整理优化版」**(补标点+合并碎句+修正识别错误+语义化小标题+对照表),原始逐字稿仅作内部素材与对照存档,不向用户全文展示。全程在用户电脑后台运行(headless),不弹窗、不要求登录视频网站,离线零成本。
+  视频/播客逐字稿提取专家(FunASR 本地转录,无需 API Key)。视频走 SenseVoice-Small(CPU 高速,自带标点);播客/访谈走 paraformer + CAM++ **说话人分离**链路,输出「说话人区块版」逐字稿(主持人/嘉宾自动识别 + 补标点 + 语义分段)。支持 微信视频号 / 抖音 / 小红书 / B站 / YouTube / 小宇宙播客 / 本地视频音频。**视频核心交付为「整理优化版」**(补标点+合并碎句+修正识别错误+语义化小标题+对照表),原始逐字稿仅作内部素材与对照存档,不向用户全文展示。全程在用户电脑后台运行(headless),不弹窗、不要求登录视频网站,离线零成本。
   触发场景:
   - 用户说"出文案"、"视频文案"、"提取文案"、"文案提取"、"视频文案提取"
   - 用户说"出逐字稿"、"提取逐字稿"、"转文字"、"视频转文字"
   - 用户说"听写视频"、"视频字幕"
   - 用户说"主持稿"、"出主持稿"
+  - 用户说"播客转文字"、"播客逐字稿"、"区分说话人"、"说话人分离"
   - 用户使用 /video-transcript 命令
   - **用户贴一个视频链接(微信视频号/抖音/小红书/B站/YouTube)→ 直接开始转录,不询问意图**
+  - **用户贴一个播客/音频链接(小宇宙 xiaoyuzhoufm.com/episode/、喜马拉雅 ximalaya.com/sound/、Apple Podcasts)→ 自动走说话人分离链路**
+  - **用户贴微博/知乎/西瓜视频/AcFun 等其他链接 → 也直接试转录(yt-dlp 兜底),不要先反问**
+  - 用户给本地视频/音频文件路径(mp4/mp3/m4a/wav 等)→ 直接转录
   - 只有用户明确说"只下载"、"保存MP4"、"下载视频不用转录"时,才走纯下载流程
+  - 已知不支持:Spotify(DRM)、快手 — 脚本会打印具体原因和替代做法,照着转达即可
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep
 user-invocable: true
 ---
@@ -52,14 +57,27 @@ VT_PY="${VT_PY:-$HOME/.workbuddy/binaries/python/envs/default/bin/python}"
 
 ## 阶段 1 · 意图分流(贴链接 = 直接转录,不问)
 
-**默认规则:用户贴视频链接 → 直接进入转录,不询问。**
+**默认规则:用户贴视频/播客链接 → 直接进入转录,不询问。**
 
 | 用户行为 | 处理 |
 |---|---|
 | 贴视频链接,无其他说明 | **直接转录,不问** |
+| 贴播客/音频链接(小宇宙/喜马拉雅/Apple Podcasts) | **直接转录,自动带说话人分离** |
 | 贴链接 + 说「文案/逐字稿/主持稿/转文字」 | 直接转录 |
 | 明确说「只下载」「保存MP4」「不用转录」 | 走 `video-download` |
 | 只说「处理视频」但没附链接 | 问用户要链接 |
+
+平台支持分三档,不确定的链接**直接试,不要预先劝退**:
+
+| 档位 | 平台 | 说明 |
+|---|---|---|
+| 专门解析 | B站(含 b23.tv)、抖音、小红书、YouTube、微信视频号、小宇宙单集 | 最稳 |
+| 播客链路 | 小宇宙单集、喜马拉雅单集、Apple Podcasts | 自动说话人分离 |
+| yt-dlp 兜底 | 微博、知乎、西瓜视频、AcFun 等 | 能跑,默认走视频链路;要区分说话人加 `--speakers` |
+| 不支持 | Spotify(DRM)、快手 | 脚本给出原因+替代做法 |
+
+常见误贴:小宇宙**节目主页**(`/podcast/`)和喜马拉雅**专辑页**(`/album/`)都不是单集页,
+脚本会明确提示改用单集链接 —— 把提示原样转达给用户,别自己瞎猜别的原因。
 
 仅下载时定位 `video-download` 后跑 `download_video.py "<URL>" --json`,不要再进入转录。
 
@@ -153,6 +171,63 @@ stderr 会先打 📊 评估表。**立刻复述给用户**(标题/时长/预估
 
 脚本打印 `[OK] 缓存命中` 时:直接用已有 `预整理.md` 做 patch → 渲染整理优化版。用户明确要求重跑才加 `--force`。
 
+## 播客/说话人分离模式
+
+**触发**:小宇宙 episode 链接自动启用;其他输入(本地音频/任意 URL)加 `--speakers` 强制启用。
+
+```bash
+# 小宇宙链接:自动说话人分离,无需额外参数
+"$VT_PY" "$VT_HOME/scripts/transcript.py" "https://www.xiaoyuzhoufm.com/episode/xxxx"
+
+# 本地音频/其他来源:强制说话人分离,可手动指定人名
+"$VT_PY" "$VT_HOME/scripts/transcript.py" 访谈.m4a --speakers --host 张三 --guest 李四
+
+# 只重跑后处理(调版式/改人名),复用已有转录,不重跑 ASR、不重新下载
+"$VT_PY" "$VT_HOME/scripts/transcript.py" <同一输入> --reformat --host 张三 --guest 李四
+```
+
+**版式不满意/人名认错时用 `--reformat`,不要用 `--force`。** `--force` 会连十几分钟的 ASR 一起重跑；
+`--reformat` 复用 `outputs/.partial/<hash>/transcription.json`,1 小时单集约 1 分钟出新版。
+
+小宇宙以外的播客平台(喜马拉雅/Apple Podcasts)没有音频直链,自动用 yt-dlp 取音频,
+拿不到 Shownotes,所以说话人会回退成「说话人 A/B」,想要真名就手动传 `--host` / `--guest`。
+
+**产物**:`*_逐字稿.md`(说话人区块,成品)、`*_逐字稿.srt`(带说话人前缀、句级时间轴,可直接压字幕)、
+`*_outputs.json`、`.partial/<hash>/transcription.json`(原始转录,`--reformat` 的输入)。
+
+**转录期间**每 30 秒打一行 `[转录中] 已跑 x 分,约 y%,预计还需 z 分`。
+进度是按音频时长估的,不是真实完成度;转录本身是一次不可中断的推理,
+中途失败只能重跑(**不切块是有意的**:CAM++ 的说话人编号只在单次推理内一致,切块会让同一个人在不同块里换编号)。
+
+ASR 一落盘就删掉临时 wav(1 小时单集约 115MB);要留音频排查加 `--keep-audio`。
+
+与视频链路的区别:
+
+| | 视频链路 | 播客链路 |
+|---|---|---|
+| 引擎 | SenseVoice-Small(快,~6x 实时) | paraformer + CAM++(慢,约音频时长 25%,1 小时单集约 15 分钟) |
+| 说话人 | 无 | 自动分离 + 主持人/嘉宾映射 |
+| 输出 | `*_预整理.md`(需 agent patch 润色) | `*_逐字稿.md`(**成品,直接交付,不走 patch 流程**)+ `*_逐字稿.srt` |
+| 首次模型 | SenseVoice 234M | paraformer/CAM++/VAD/punc 约 1GB |
+
+自动化处理:小宇宙页 `__NEXT_DATA__` 解析标题/音频直链/Shownotes → 从 Shownotes 提取主持人/嘉宾姓名(取不到回退「说话人 A/B」) → 半截词缝合 → ct-punc 补标点 → 语义分段 → 通用 AI 术语纠错。
+
+输出版式(说话人区块):
+
+```markdown
+## 说话人
+- **主持人** 曲凯:约 30% 时长
+- **嘉宾** 孟繁青:约 70% 时长
+
+## 逐字稿
+### 00:22 – 00:30　主持人 · 曲凯
+因为这块也很热嘛,所以今天很开心请到…
+```
+
+播客专属词表扩展:在 `$VT_HOME/.podcast_glossary.json` 写 `[["错误词","修正词"], ...]`,会叠加在内置通用 AI 术语表之上。
+
+agent 拿到播客 `*_逐字稿.md` 后:**直接在对话里输出全文**(或按用户要求摘要),不要再跑 `make_optimized.py`。
+
 ## 阶段 5 · 异常处理
 
 | 场景 | 处理 |
@@ -160,6 +235,11 @@ stderr 会先打 📊 评估表。**立刻复述给用户**(标题/时长/预估
 | `--doctor` 报缺依赖 | `bash "$VT_HOME/install.sh"` |
 | funasr 未安装 | `pip install funasr torchaudio` |
 | 首次运行联网失败 | 首次需下载 SenseVoice-Small(约 234M) |
+| 播客模式首次很慢 | 首次自动下载 paraformer/CAM++/VAD/punc 模型(约 1GB),之后走本地缓存 |
+| 播客版式/人名要改 | 用 `--reformat`(秒级),别用 `--force`(会重跑 ASR) |
+| 播客转录中途中断 | 只能重跑,ASR 不支持续跑(切块会打乱说话人编号);已完成的单集看 `.partial/<hash>/transcription.json` |
+| 某节目专有名词老是错 | 写 `$VT_HOME/.podcast_glossary.json`: `[["错词","对词"]]`,优先于内置词表 |
+| 小宇宙解析失败 | 页面结构变化;可先下载音频再 `--speakers` 转本地文件 |
 | 抖音图文笔记 | 提示仅支持视频 |
 | 平台前端改版 | 看 `$VT_HOME/FALLBACK.md` |
 | 视频号缺登录态 | `"$VT_PY" "$VT_HOME/scripts/sph_resolver.py" --login` |
@@ -186,10 +266,15 @@ stderr 会先打 📊 评估表。**立刻复述给用户**(标题/时长/预估
 | `--force` / `--no-cache` | 忽略同 URL 缓存 |
 | `--keep-video` | 额外保存 MP4 |
 | `--no-daemon` | 不使用常驻模型 |
+| `--speakers` | 强制说话人分离模式(小宇宙链接自动启用) |
+| `--host` / `--guest` | 说话人分离模式手动指定主持人/嘉宾姓名 |
+| `--reformat` | 复用已有转录只重跑后处理(调版式/改人名,不重跑 ASR) |
+| `--keep-audio` | 播客模式转录后保留临时 wav(默认清理) |
 
 ## Notes
 
-- 唯一引擎 FunASR SenseVoice-Small:中文 CER 7.81%,模型 234M,CPU 约 6x 实时
+- 视频引擎 FunASR SenseVoice-Small:中文 CER 7.81%,模型 234M,CPU 约 6x 实时
+- 播客引擎 paraformer-zh + fsmn-vad + ct-punc + CAM++:带说话人分离,约 0.15x 实时
 - 视频号不再 probe+download 各解析一遍;默认也不下完整视频
 - FunASR daemon 常驻后,后续任务跳过 15~30s 模型加载;空闲 30 分钟自动退出
 - 时间戳是段落级,用于章节定位

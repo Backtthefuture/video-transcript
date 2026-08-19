@@ -33,7 +33,7 @@ fi
 bar
 printf "${C_BOLD}  🎬 视频逐字稿 Skill 安装向导${C_RESET}\n"
 sep
-echo "  把 B 站/抖音/小红书/YouTube 视频自动转成逐字稿"
+echo "  把 B 站/抖音/小红书/YouTube 视频、小宇宙播客自动转成逐字稿"
 echo "  全程在你电脑后台跑,不弹窗、不要登录视频网站"
 echo ""
 echo "  接下来 7 步,大约 6-12 分钟:"
@@ -114,6 +114,8 @@ sep
 info "安装 funasr + torchaudio(纯本地转录,不需要 API Key)..."
 python3 -m pip install $PIP_FLAGS --upgrade funasr torchaudio
 ok "funasr 装好"
+info "视频转录模型 SenseVoice-Small(234M)首次转录时自动下载"
+info "播客说话人分离模型 paraformer/CAM++/VAD/punc(约 1GB)首次转播客时自动下载"
 
 # 写入最小 .env(可选热词)
 cat > "$ENV_FILE" <<EOF

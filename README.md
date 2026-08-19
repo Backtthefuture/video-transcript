@@ -2,9 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-把 微信视频号 / B站 / 抖音 / 小红书 / YouTube / 本地视频 自动转成**逐字稿文案**（保留口语词、网络梗、停顿）。
+把 微信视频号 / B站 / 抖音 / 小红书 / YouTube / 本地视频 自动转成**逐字稿文案**（保留口语词、网络梗、停顿）。贴小宇宙 / 喜马拉雅 / Apple Podcasts 单集链接时，自动走 **paraformer + CAM++ 说话人分离**，输出带主持人/嘉宾标签的逐字稿和 SRT。
 
-全程在你电脑**本地离线**跑：下载 → 提音频 → **FunASR（SenseVoice-Small）**转录。不需要任何 API Key、不上传视频、不弹窗、不要登录视频网站（模型首次下载后全离线）。
+全程在你电脑**本地离线**跑：下载 → 提音频 → FunASR 转录。不需要任何 API Key、不上传音视频、不弹窗、不要登录视频网站（模型首次下载后全离线）。
 
 ---
 
@@ -63,7 +63,9 @@ pip3 install --break-system-packages funasr torchaudio
 - 小红书：`https://www.xiaohongshu.com/discovery/item/xxx` 或短链 `xhslink.com/xxx`
 - YouTube：`https://youtube.com/watch?v=xxx`
 - 微信视频号：`https://weixin.qq.com/sph/xxx` 或 `channels.weixin.qq.com/...`
-- 本地文件：`/path/to/video.mp4`
+- 小宇宙单集：`https://www.xiaoyuzhoufm.com/episode/xxx`（自动说话人分离）
+- 喜马拉雅单集 / Apple Podcasts（自动说话人分离；人名可用 `--host` / `--guest` 指定）
+- 本地文件：`/path/to/video.mp4` 或音频 `m4a/mp3/wav`（加 `--speakers` 走说话人分离）
 
 微信视频号转录依赖配套 skill `video-download`（已由 install.sh 自动安装，默认 `public-worker` 解析，无需 Cookie）。若只下载视频号视频，请直接走 `video-download`。
 
@@ -91,8 +93,12 @@ python3 ~/.claude/skills/video-transcript/scripts/transcript.py "<URL>"
 ```bash
 python3 ~/.claude/skills/video-transcript/scripts/transcript.py "<URL>" --force      # 忽略缓存
 python3 ~/.claude/skills/video-transcript/scripts/transcript.py "<URL>" --keep-video # 额外留 MP4
+python3 ~/.claude/skills/video-transcript/scripts/transcript.py 访谈.m4a --speakers --host 张三 --guest 李四
+python3 ~/.claude/skills/video-transcript/scripts/transcript.py "<同一输入>" --reformat --host 张三 --guest 李四
 python3 ~/.claude/skills/video-transcript/scripts/asr_daemon.py --status
 ```
+
+播客模式首次会额外下载 paraformer / CAM++ / VAD / 标点模型（约 1GB）。版式或人名要改时用 `--reformat`（复用已有转录，秒级），不要用 `--force`（会重跑 ASR）。
 
 ### 实际体验
 
@@ -142,6 +148,8 @@ python3 ~/.claude/skills/video-transcript/scripts/asr_daemon.py --status
 
 > **整理优化版**：agent 默认还会在逐字稿基础上整理一版「整理优化版」（补标点、合并碎句、修正识别错误、语义化小标题 + 识别修正对照表），作为对话与预览的核心交付。
 
+播客 / 说话人分离模式额外产出 `*_逐字稿.md`（成品，按说话人分块）和 `*_逐字稿.srt`（带说话人前缀）。这类稿件不走视频的 patch 润色流程。
+
 ---
 
 ## 🛠 命令行选项
@@ -153,6 +161,10 @@ python3 ~/.claude/skills/video-transcript/scripts/asr_daemon.py --status
 | `--no-save` | 不写 .md 文件（默认会保存） |
 | `--output-dir` | 改输出目录 |
 | `--doctor` | 体检模式：检查所有依赖+配置 |
+| `--speakers` | 强制说话人分离（小宇宙 / 喜马拉雅 / Apple Podcasts 单集会自动启用） |
+| `--host` / `--guest` | 说话人分离模式手动指定主持人 / 嘉宾姓名 |
+| `--reformat` | 复用已有转录只重跑后处理（调版式 / 改人名，不重跑 ASR） |
+| `--keep-audio` | 播客模式转录后保留临时 wav（默认清理） |
 
 ---
 
@@ -194,7 +206,11 @@ python3 ~/.claude/skills/video-transcript/scripts/transcript.py --doctor
 ├── .gitignore
 ├── outputs/                      ← 逐字稿落盘目录
 └── scripts/
-    ├── transcript.py             ← 主流程（--doctor 体检 / probe / 下载 / 转录 / 分段）
+    ├── transcript.py             ← 主流程（视频 / 播客分流）
+    ├── diarize_asr.py            ← 播客说话人分离（paraformer + CAM++）
+    ├── speaker_postprocess.py    ← 缝合 / 补标点 / 说话人映射 / Markdown+SRT
+    ├── podcast_extractor.py      ← 小宇宙单集解析
+    ├── podcast_glossary.py       ← 通用 AI 术语纠错
     ├── make_optimized.py         ← 生成「整理优化版」md + html
     └── platform_extractor.py     ← 抖音/小红书/B 站 headless 直链抓取
 ```
@@ -246,7 +262,7 @@ python3 ~/.claude/skills/video-transcript/scripts/transcript.py --doctor
 - **全程本地离线**：视频只在你电脑上处理，不上传任何视频或音频到第三方
 - 不需要任何 API Key，零成本
 - 可选热词配置在本地 `.env`（权限 600），`.gitignore` 已屏蔽
-- 首次使用需联网下载 FunASR 模型（约 234M，ModelScope），之后全离线
+- 首次使用需联网下载 FunASR 模型（视频 SenseVoice 约 234M；播客 paraformer/CAM++ 约 1GB，ModelScope），之后全离线
 
 ---
 

@@ -82,7 +82,21 @@ def detect_platform(url):
         return "douyin"
     if "weixin.qq.com/sph" in url_lower or "channels.weixin.qq.com" in url_lower:
         return "wechat_channels"
+    if "xiaoyuzhoufm.com/episode/" in url_lower:
+        return "xiaoyuzhou"
+    if "ximalaya.com" in url_lower:
+        return "ximalaya"
+    if "podcasts.apple.com" in url_lower:
+        return "apple_podcasts"
     return "unknown"
+
+
+# 音频类平台：默认按播客处理(说话人分离)。小宇宙自带解析，其余靠 yt-dlp 取音频。
+PODCAST_PLATFORMS = ("xiaoyuzhou", "ximalaya", "apple_podcasts")
+
+
+def is_podcast_platform(url):
+    return detect_platform(url) in PODCAST_PLATFORMS
 
 
 def is_browser_only_platform(url):
@@ -96,6 +110,9 @@ def platform_zh_name(platform):
         "bilibili": "B 站",
         "youtube": "YouTube",
         "wechat_channels": "微信视频号",
+        "xiaoyuzhou": "小宇宙",
+        "ximalaya": "喜马拉雅",
+        "apple_podcasts": "Apple Podcasts",
         "local": "本地文件",
         "unknown": "未知平台",
     }.get(platform, platform or "视频")
@@ -462,8 +479,12 @@ def normalize_input(value):
     return value.split("#")[0].rstrip("/")
 
 
-def cache_key(value):
-    return hashlib.sha1(normalize_input(value).encode("utf-8")).hexdigest()[:16]
+def cache_key(value, mode="video"):
+    """两种引擎产物不可互换，故 key 带模式命名空间(video 沿用旧 key,保留历史缓存)。"""
+    seed = normalize_input(value)
+    if mode != "video":
+        seed = f"{mode}::{seed}"
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
 
 
 def _load_cache_index():
@@ -476,9 +497,11 @@ def _load_cache_index():
         return {}
 
 
-def cache_lookup(input_path):
-    hit = _load_cache_index().get(cache_key(input_path))
+def cache_lookup(input_path, mode="video"):
+    hit = _load_cache_index().get(cache_key(input_path, mode))
     if not hit:
+        return None
+    if hit.get("mode", "video") != mode:
         return None
     pre = hit.get("preorganized_path")
     if pre and os.path.exists(pre):
@@ -486,10 +509,10 @@ def cache_lookup(input_path):
     return None
 
 
-def cache_store(input_path, payload):
+def cache_store(input_path, payload, mode="video"):
     os.makedirs(os.path.dirname(CACHE_INDEX), exist_ok=True)
     idx = _load_cache_index()
-    idx[cache_key(input_path)] = payload
+    idx[cache_key(input_path, mode)] = {"mode": mode, **payload}
     with open(CACHE_INDEX, "w", encoding="utf-8") as f:
         json.dump(idx, f, ensure_ascii=False, indent=2)
 
@@ -704,6 +727,314 @@ def emit_cache_hit(hit):
     print(json.dumps({"cache": True, **hit}, ensure_ascii=False), file=sys.stderr)
 
 
+PODCAST_MODE = "podcast_speakers"
+
+# 常见误贴/不支持的链接形态 → 明确告诉用户该怎么做
+UNSUPPORTED_HINTS = [
+    (
+        r"xiaoyuzhoufm\.com/podcast/",
+        "这是小宇宙的**节目主页**，不是单集页。",
+        "打开想转的那一集，复制地址栏里形如 /episode/xxxxx 的链接再试。",
+    ),
+    (
+        r"open\.spotify\.com",
+        "Spotify 有 DRM 保护，无法提取音频。",
+        "换小宇宙/喜马拉雅/Apple Podcasts 上的同一节目，或先自行下载音频后传本地文件。",
+    ),
+    (
+        r"(kuaishou\.com|v\.kuaishou\.com|kwai\.com)",
+        "快手目前没有可用的下载解析。",
+        "可先用 video-download skill 试下载，或手动存成本地文件再转。",
+    ),
+    (
+        r"ximalaya\.com/album/",
+        "这是喜马拉雅的**专辑页**，不是单集页。",
+        "点进具体一集(地址含 /sound/)再复制链接。",
+    ),
+]
+
+
+def _fail_unsupported_url(url, exc=None):
+    """给已知的误贴/不支持链接打出可操作的提示，而不是只丢一句解析失败。"""
+    for pattern, why, howto in UNSUPPORTED_HINTS:
+        if re.search(pattern, url or "", re.I):
+            print(f"[ERROR] {why}", file=sys.stderr)
+            print(f"  怎么办: {howto}", file=sys.stderr)
+            sys.exit(1)
+    print(f"[ERROR] 这个链接解析不了: {exc}" if exc else "[ERROR] 这个链接解析不了", file=sys.stderr)
+    print("  支持: B站/抖音/小红书/YouTube/微信视频号/小宇宙单集/喜马拉雅单集/Apple Podcasts,以及本地文件", file=sys.stderr)
+    print("  也可先用 video-download skill 存成本地文件,再把文件路径传进来。", file=sys.stderr)
+    sys.exit(1)
+
+
+def _podcast_hotwords(title, host="", guest=""):
+    """从标题/人名提取热词，提升 paraformer 对专有名词的识别。"""
+    terms = re.findall(r"[A-Za-z][A-Za-z0-9+\-\.]{2,}", title or "")
+    for name in (host, guest):
+        if name and 2 <= len(name) <= 6:
+            terms.append(name)
+    if FUNASR_HOTWORD:
+        terms.extend(FUNASR_HOTWORD.split())
+    terms = list(dict.fromkeys(t for t in terms if t))
+    return " ".join(terms[:20]) or None
+
+
+def run_podcast(input_path, title=None, output_dir=None, save_md=True,
+                use_cache=True, host="", guest="", reformat=False, keep_audio=False):
+    """播客链路:说话人分离(paraformer + CAM++) + 可读性后处理。
+
+    reformat=True 时复用已存的 transcription.json，只重跑后处理(秒级)，
+    用于调版式/改人名，不必重跑十几分钟的 ASR。
+    """
+    if not check_ffmpeg():
+        print("[ERROR] ffmpeg 未安装!请运行: brew install ffmpeg", file=sys.stderr)
+        sys.exit(1)
+    if use_cache and not reformat and cache_lookup(input_path, PODCAST_MODE):
+        emit_cache_hit(cache_lookup(input_path, PODCAST_MODE))
+        return
+
+    from podcast_extractor import extract_episode, is_xiaoyuzhou_episode
+
+    out_dir = output_dir or DEFAULT_OUTPUT_DIR
+    work_dir = os.path.join(out_dir, ".partial", cache_key(input_path, PODCAST_MODE))
+    asr_json = os.path.join(work_dir, "transcription.json")
+
+    audio_source = input_path
+    podcast_name = ""
+    shownotes = ""
+    episode_url = input_path if is_url(input_path) else ""
+    duration = 0
+    segments = None
+
+    # --reformat:元数据与转录结果都从 transcription.json 还原,不联网、不提音频
+    if reformat:
+        if not os.path.exists(asr_json):
+            print(f"[ERROR] --reformat 需要已有转录结果,未找到: {asr_json}", file=sys.stderr)
+            print("  请先不带 --reformat 跑一次。", file=sys.stderr)
+            sys.exit(1)
+        try:
+            with open(asr_json, encoding="utf-8") as f:
+                saved = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[ERROR] 转录结果读取失败: {e}", file=sys.stderr)
+            sys.exit(1)
+        segments = saved.get("segments") or None
+        if not segments:
+            print("[ERROR] 转录结果为空,请重跑 ASR", file=sys.stderr)
+            sys.exit(1)
+        title = title or saved.get("title")
+        episode_url = saved.get("url") or ""
+        podcast_name = saved.get("podcast") or ""
+        shownotes = saved.get("shownotes_text") or ""
+        duration = saved.get("duration_seconds") or 0
+        print(f"[Step 1/2] 复用已有转录({len(segments)} 段),跳过下载与 ASR", file=sys.stderr)
+        print(f"  来源: {asr_json}", file=sys.stderr)
+
+    wav_path = os.path.join(WORK_DIR, "podcast_audio.wav")
+    if not reformat:
+        print("[Step 0/3] 解析播客单集...", file=sys.stderr)
+        use_ytdlp_audio = False
+        if is_url(input_path) and is_xiaoyuzhou_episode(input_path):
+            try:
+                ep = extract_episode(input_path)
+            except Exception as e:
+                print(f"[ERROR] 小宇宙解析失败: {e}", file=sys.stderr)
+                sys.exit(1)
+            audio_source = ep["audio_url"]
+            podcast_name = ep["podcast"]
+            shownotes = ep["shownotes_text"]
+            duration = ep["duration_sec"]
+            episode_url = ep["url"]
+            if not title:
+                title = ep["title"]
+        elif is_url(input_path):
+            # 喜马拉雅/Apple Podcasts 等无音频直链，交给 yt-dlp 取标题与音频
+            use_ytdlp_audio = True
+            try:
+                probed = _ytdlp_probe(input_path)
+                duration = probed.get("duration") or 0
+                if not title:
+                    title = probed.get("title") or ""
+            except Exception as e:
+                _fail_unsupported_url(input_path, e)
+        else:
+            input_path = os.path.abspath(os.path.expanduser(input_path))
+            audio_source = input_path
+            if not title:
+                title = Path(input_path).stem
+
+        platform = detect_platform(input_path) if is_url(input_path) else "local"
+        from diarize_asr import REALTIME_FACTOR
+        est_sec = int(duration * REALTIME_FACTOR) if duration else None
+        bar = "═" * 55
+        print(bar, file=sys.stderr)
+        print("  🎙️ 播客探测(说话人分离模式)", file=sys.stderr)
+        print(f"  平台:      {platform_zh_name(platform)}", file=sys.stderr)
+        print(f"  标题:      {title or '(未抓到标题)'}", file=sys.stderr)
+        print(f"  时长:      {fmt_duration_human(duration)}", file=sys.stderr)
+        if est_sec:
+            print(
+                f"  预估耗时:  {fmt_estimate_range(est_sec)}"
+                f"(paraformer+CAM++ 约音频时长 {REALTIME_FACTOR:.0%})",
+                file=sys.stderr,
+            )
+        print(bar, file=sys.stderr)
+
+        os.makedirs(WORK_DIR, exist_ok=True)
+        if os.path.exists(wav_path):
+            try:
+                os.remove(wav_path)
+            except OSError:
+                pass
+
+        print("\n[Step 1/3] 提取 16k 单声道音频...", file=sys.stderr)
+        try:
+            if use_ytdlp_audio:
+                download_audio_ytdlp(input_path, wav_path)
+            elif is_url(audio_source):
+                extract_audio_from_url(audio_source, wav_path)
+            else:
+                extract_audio_wav(audio_source, wav_path)
+        except Exception as e:
+            print(f"[ERROR] 提音频失败: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        wav_dur = wav_duration(wav_path)
+        if wav_dur > 0:
+            duration = wav_dur
+        print(
+            f"[INFO] 音频 {os.path.getsize(wav_path)/1024/1024:.1f}MB / {fmt_duration_human(duration)}",
+            file=sys.stderr,
+        )
+
+    from speaker_postprocess import build_markdown, build_srt, parse_speaker_names
+    if not host or not guest:
+        h, g = parse_speaker_names(shownotes)
+        host = host or h
+        guest = guest or g
+    if host or guest:
+        print(f"[INFO] 说话人: 主持人={host or '?'} / 嘉宾={guest or '?'}", file=sys.stderr)
+
+    if segments is None and use_cache and os.path.exists(asr_json):
+        # 上次 ASR 成功但后处理失败/产物被删时,直接续上
+        try:
+            with open(asr_json, encoding="utf-8") as f:
+                segments = json.load(f).get("segments") or None
+            if segments:
+                print(f"\n[Step 2/3] 复用已有转录结果({len(segments)} 段),跳过 ASR", file=sys.stderr)
+                print(f"  来源: {asr_json}", file=sys.stderr)
+        except (OSError, json.JSONDecodeError):
+            segments = None
+
+    if segments is None:
+        print("\n[Step 2/3] FunASR 说话人分离转录(paraformer + CAM++,较慢)...", file=sys.stderr)
+        from diarize_asr import diarize_wav
+        try:
+            segments = diarize_wav(
+                wav_path,
+                duration_sec=duration,
+                hotword=_podcast_hotwords(title, host, guest),
+            )
+        except Exception as e:
+            print(f"[ERROR] 说话人分离转录失败: {e}", file=sys.stderr)
+            print("  提示: 首次使用需联网下载 paraformer/CAM++ 模型(约 1GB)。", file=sys.stderr)
+            sys.exit(1)
+        print(f"[INFO] 共 {len(segments)} 个句级片段", file=sys.stderr)
+        # 先落原始转录，后处理再失败也不必重跑 ASR
+        try:
+            os.makedirs(work_dir, exist_ok=True)
+            with open(asr_json, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "schema_version": 1,
+                        "model": "paraformer-zh + cam++",
+                        "title": title,
+                        "url": episode_url,
+                        "podcast": podcast_name,
+                        "duration_seconds": duration,
+                        "shownotes_text": shownotes,
+                        "segments": segments,
+                    },
+                    f, ensure_ascii=False, indent=2,
+                )
+            print(f"[OK] 原始转录已存: {asr_json}", file=sys.stderr)
+        except OSError as e:
+            print(f"[WARN] 原始转录落盘失败(不影响本次输出): {e}", file=sys.stderr)
+        # 转录已落盘，wav 不再需要(重跑后处理走 --reformat,不用音频)
+        if not keep_audio and os.path.exists(wav_path):
+            try:
+                freed = os.path.getsize(wav_path) / 1024 / 1024
+                os.remove(wav_path)
+                print(f"[INFO] 已清理临时音频(释放 {freed:.0f}MB)", file=sys.stderr)
+            except OSError:
+                pass
+
+    print("\n[Step 3/3] 可读性后处理(缝合/补标点/分段/说话人映射)...", file=sys.stderr)
+    gen_date = time.strftime("%Y-%m-%d %H:%M")
+    md = build_markdown(
+        title=title or "播客逐字稿",
+        segments=segments,
+        url=episode_url,
+        podcast=podcast_name,
+        duration_label=_fmt_mmss(int(duration)),
+        shownotes=shownotes,
+        host_name=host,
+        guest_name=guest,
+        generated_at=gen_date,
+    )
+
+    outputs = {}
+    if save_md:
+        os.makedirs(out_dir, exist_ok=True)
+        stem = f"{time.strftime('%Y-%m-%d')}_{safe_filename(title or 'podcast', 30)}"
+        md_file = os.path.join(out_dir, f"{stem}_逐字稿.md")
+        with open(md_file, "w", encoding="utf-8") as f:
+            f.write(md)
+        print(f"\n[OK] 逐字稿: {md_file}", file=sys.stderr)
+
+        srt_file = os.path.join(out_dir, f"{stem}_逐字稿.srt")
+        try:
+            srt_text = build_srt(
+                segments, shownotes=shownotes, host_name=host, guest_name=guest
+            )
+            with open(srt_file, "w", encoding="utf-8") as f:
+                f.write(srt_text)
+            print(f"[OK] 字幕(带说话人): {srt_file}", file=sys.stderr)
+        except Exception as e:
+            print(f"[WARN] SRT 生成失败(不影响逐字稿): {e}", file=sys.stderr)
+            srt_file = None
+
+        outputs = {
+            "transcript_path": md_file,
+            "preorganized_path": md_file,
+            "srt_path": srt_file,
+            "transcription_json": asr_json if os.path.exists(asr_json) else None,
+            "title": title,
+            "duration": int(duration),
+            "created_at": gen_date,
+            "source_url": normalize_input(input_path) if is_url(input_path) else input_path,
+            "mode": PODCAST_MODE,
+        }
+        sidecar = os.path.join(out_dir, f"{stem}_outputs.json")
+        with open(sidecar, "w", encoding="utf-8") as f:
+            json.dump(outputs, f, ensure_ascii=False, indent=2)
+        outputs["outputs_json"] = sidecar
+        cache_store(input_path, outputs, PODCAST_MODE)
+        try:
+            html_str = md_to_html(md, download_name=os.path.basename(md_file))
+            if html_str:
+                with open(os.path.splitext(md_file)[0] + ".html", "w", encoding="utf-8") as f:
+                    f.write(html_str)
+        except Exception:
+            pass
+
+    print("=" * 55, file=sys.stderr)
+    print("[OK] 播客逐字稿完成(说话人区块版)。", file=sys.stderr)
+    print(md)
+    print("----- VT_OUTPUTS -----", file=sys.stderr)
+    print(json.dumps(outputs, ensure_ascii=False), file=sys.stderr)
+
+
 def run(input_path, title=None, output_dir=None, save_md=True, use_cache=True, keep_video=False, use_daemon=True):
     if not check_ffmpeg():
         print("[ERROR] ffmpeg 未安装!请运行: brew install ffmpeg", file=sys.stderr)
@@ -719,6 +1050,8 @@ def run(input_path, title=None, output_dir=None, save_md=True, use_cache=True, k
     try:
         meta = resolve_or_probe(input_path)
     except Exception as e:
+        if is_url(input_path):
+            _fail_unsupported_url(input_path, e)
         print(f"[ERROR] 解析失败: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -880,6 +1213,14 @@ def doctor():
     except ImportError:
         print("  ✗ funasr 未安装")
         issues.append("pip install funasr torchaudio")
+    ms_cache = os.path.expanduser("~/.cache/modelscope/models")
+    spk_models = ["paraformer", "campplus", "punc_ct-transformer", "fsmn_vad"]
+    cached = os.listdir(ms_cache) if os.path.isdir(ms_cache) else []
+    missing = [m for m in spk_models if not any(m in c for c in cached)]
+    if not missing:
+        print("  ✓ 播客说话人分离模型(paraformer/CAM++/VAD/punc)已缓存")
+    else:
+        print(f"  ⚠ 说话人分离模型未缓存({'/'.join(missing)}),首次播客转录自动下载(约 1GB)")
     if find_video_download_script():
         print(f"  ✓ video-download: {find_video_download_script()}")
     else:
@@ -921,12 +1262,33 @@ def main():
     parser.add_argument("--force", action="store_true", help="忽略缓存,强制重跑")
     parser.add_argument("--keep-video", action="store_true", help="额外保存完整 MP4")
     parser.add_argument("--no-daemon", dest="use_daemon", action="store_false")
+    parser.add_argument("--speakers", action="store_true",
+                        help="强制说话人分离模式(paraformer+CAM++,较慢;小宇宙链接自动启用)")
+    parser.add_argument("--host", default="", help="主持人姓名(说话人分离模式)")
+    parser.add_argument("--guest", default="", help="嘉宾姓名(说话人分离模式)")
+    parser.add_argument("--reformat", action="store_true",
+                        help="复用已有转录只重跑后处理(调版式/改人名,秒级;仅说话人分离模式)")
+    parser.add_argument("--keep-audio", action="store_true",
+                        help="转录后保留临时 wav(默认清理,1 小时单集约 115MB)")
     parser.set_defaults(save_md=True, use_cache=True, use_daemon=True)
     args = parser.parse_args()
     if args.doctor:
         sys.exit(doctor())
     if not args.input:
         parser.error("缺少 input 参数")
+    if args.speakers or args.reformat or (is_url(args.input) and is_podcast_platform(args.input)):
+        run_podcast(
+            args.input,
+            title=args.title,
+            output_dir=args.output_dir,
+            save_md=args.save_md,
+            use_cache=(args.use_cache and not args.force),
+            host=args.host,
+            guest=args.guest,
+            reformat=args.reformat,
+            keep_audio=args.keep_audio,
+        )
+        return
     run(
         args.input,
         title=args.title,
