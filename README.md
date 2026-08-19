@@ -86,6 +86,14 @@ python3 ~/.workbuddy/skills/video-transcript/scripts/sph_resolver.py "<链接>" 
 python3 ~/.claude/skills/video-transcript/scripts/transcript.py "<URL>"
 ```
 
+加速版默认：**视频号 HTTP 解析一次**、**直链只提音频**、**FunASR daemon 预热并行**、机器预整理后由 agent 只出 patch。
+
+```bash
+python3 ~/.claude/skills/video-transcript/scripts/transcript.py "<URL>" --force      # 忽略缓存
+python3 ~/.claude/skills/video-transcript/scripts/transcript.py "<URL>" --keep-video # 额外留 MP4
+python3 ~/.claude/skills/video-transcript/scripts/asr_daemon.py --status
+```
+
 ### 实际体验
 
 跑命令时会看到：
@@ -93,14 +101,14 @@ python3 ~/.claude/skills/video-transcript/scripts/transcript.py "<URL>"
 ═══════════════════════════════════════════════════════
   📊 视频探测
 ───────────────────────────────────────────────────────
-  平台:      B 站
-  标题:      在浙江和安徽之间，一座10万人的城市消失了
-  时长:      17分12秒
-  分段:      3 段(每段 ≤ 6 分钟)
-  预估耗时:  3分20秒 ~ 5分25秒
+  平台:      微信视频号
+  标题:      ...
+  时长:      10分00秒
+  分段:      2 段并行/流式转录(每段 ≤ 5 分钟)
+  预估耗时:  1分12秒 ~ 1分57秒
 ═══════════════════════════════════════════════════════
 ```
-然后自动跑 下载 → 提音频 → 转录 → 分段，全程无人值守。
+然后自动跑 解析一次 → 直链提音频(+模型预热) → 转录 → 机器预整理，全程无人值守。
 
 ---
 

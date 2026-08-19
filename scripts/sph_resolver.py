@@ -1,26 +1,47 @@
 #!/usr/bin/env python3
 """
 微信视频号解析器(复用元宝登录态)
+
 用法:
   python3 sph_resolver.py <视频号分享链接>
   python3 sph_resolver.py --check          # 检查登录态是否有效
-  python3 sph_resolver.py --login          # 手动打开浏览器扫码登录并保存登录态
+  python3 sph_resolver.py --login          # 打开浏览器扫码登录并保存登录态
 
-流程: 打开腾讯元宝(复用/获取登录态) → 官方接口 get_parse_result 拿 playable_url → get_feed_info 拿视频直链 → 输出 JSON
+优先从 ~/.workbuddy/credentials/yuanbao_state.json 抽 Cookie 走纯 HTTP
+(getuserinfo → get_parse_result → get_feed_info),约 2~5 秒。
+HTTP 失败才回退到**单次** headless 浏览器(登录检查+解析合并,等 $webApi 就绪,不再固定睡 6 秒)。
 """
 import asyncio
 import json
 import os
+import random
+import ssl
 import sys
 import time
-import random
+import urllib.error
 import urllib.parse
 import urllib.request
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.expanduser("~/.workbuddy/credentials/yuanbao_state.json")
 AGENT_ID = "naQivTmsDa/cf4d0079-ed1b-4c55-a3f3-2ca1379727d1"
-PYTHON = sys.executable
+YUANBAO_ORIGIN = "https://yuanbao.tencent.com"
+DESKTOP_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
+
+try:
+    import certifi
+    SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    SSL_CONTEXT = ssl.create_default_context()
+
+
+def log(msg):
+    print(msg, file=sys.stderr)
+
 
 LOGIN_JS = r"""
 () => {
@@ -96,83 +117,130 @@ def load_state():
     if not os.path.exists(STATE_FILE):
         return None
     try:
-        with open(STATE_FILE) as f:
+        with open(STATE_FILE, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
 
 
-async def run_browser(headless, storage_state, url, js_code, arg=None):
-    from playwright.async_api import async_playwright
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=headless,
-            args=["--start-maximized"] if not headless else [],
-        )
-        ctx = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 900},
-            storage_state=storage_state,
-        )
-        page = await ctx.new_page()
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(6000)
-        result = await page.evaluate(js_code, arg) if arg is not None else await page.evaluate(js_code)
-        state = None
-        if ctx.storage_state:
-            try:
-                state = await ctx.storage_state()
-            except Exception:
-                state = None
-        await browser.close()
-        return result, state
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False)
+    os.chmod(STATE_FILE, 0o600)
 
 
-def check_login_state():
-    state = load_state()
-    result, _ = asyncio.run(run_browser(True, state, "https://yuanbao.tencent.com/", LOGIN_JS))
-    return result
-
-
-def do_login():
-    """打开可见浏览器,等待扫码,保存登录态"""
-    result, state = asyncio.run(run_browser(False, None, "https://yuanbao.tencent.com/", LOGIN_JS))
-    if result.get("loggedIn"):
-        # 已登录,直接保存
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f, ensure_ascii=False)
-        os.chmod(STATE_FILE, 0o600)
-        print(f"[OK] 登录态已保存到 {STATE_FILE}")
-        return True
-    return False
-
-
-def parse_share_url(share_url):
-    state = load_state()
+def cookie_header_from_state(state):
     if not state:
-        print("[提示] 无登录态,先执行 --login 扫码登录", file=sys.stderr)
-        return None
-    # 先检查登录态
-    result, _ = asyncio.run(run_browser(True, state, "https://yuanbao.tencent.com/", LOGIN_JS))
-    if not result.get("loggedIn"):
-        print("[提示] 登录态已过期,需重新执行 --login 扫码登录", file=sys.stderr)
-        return None
-    # 解析
-    result, _ = asyncio.run(
-        run_browser(True, state, "https://yuanbao.tencent.com/", PARSE_JS, {"shareUrl": share_url, "agentId": AGENT_ID})
+        return ""
+    parts = []
+    seen = set()
+    for cookie in state.get("cookies") or []:
+        domain = cookie.get("domain") or ""
+        if "tencent.com" not in domain and "yuanbao" not in domain:
+            continue
+        name = cookie.get("name") or ""
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        parts.append(f"{name}={cookie.get('value') or ''}")
+    return "; ".join(parts)
+
+
+def _http_json(url, method="GET", payload=None, headers=None, timeout=20):
+    data = None
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=SSL_CONTEXT),
     )
-    if not result.get("ok"):
-        print(f"[错误] 解析失败: {result.get('code')} {result.get('body', '')[:200]}", file=sys.stderr)
-        return None
-    return json.loads(result["body"])
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+            status = getattr(resp, "status", 200)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"HTTP {exc.code}: {raw[:240]}") from None
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"网络请求失败: {exc.reason}") from None
+    try:
+        parsed = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        raise RuntimeError(f"接口返回不是 JSON: {body[:200]}") from None
+    return parsed, status
+
+
+def _yuanbao_headers(cookie, extra=None):
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Origin": YUANBAO_ORIGIN,
+        "Referer": f"{YUANBAO_ORIGIN}/chat/{AGENT_ID}",
+        "User-Agent": DESKTOP_UA,
+        "X-Requested-With": "XMLHttpRequest",
+        "X-Source": "web",
+        "X-Platform": "mac",
+        "Cookie": cookie,
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _pick_user_id(user_info):
+    data = user_info.get("data") if isinstance(user_info.get("data"), dict) else user_info
+    for key in ("userId", "userid", "user_id", "id"):
+        val = data.get(key) if isinstance(data, dict) else None
+        if val:
+            return str(val)
+    return ""
+
+
+def http_get_userinfo(cookie):
+    parsed, status = _http_json(
+        f"{YUANBAO_ORIGIN}/api/getuserinfo",
+        method="GET",
+        headers=_yuanbao_headers(cookie),
+    )
+    if status != 200:
+        raise RuntimeError(f"getuserinfo 失败: HTTP {status}")
+    return parsed
+
+
+def http_parse_share_url(share_url, cookie, user_id=""):
+    extra = {
+        "Content-Type": "application/json",
+        "X-AgentID": AGENT_ID,
+    }
+    if user_id:
+        extra["T-UserID"] = user_id
+        extra["X-ID"] = user_id
+    parsed, status = _http_json(
+        f"{YUANBAO_ORIGIN}/api/weixin/get_parse_result",
+        method="POST",
+        payload={"type": "video_channel_url", "url": share_url, "scene": 1},
+        headers=_yuanbao_headers(cookie, extra),
+    )
+    if status != 200:
+        raise RuntimeError(f"get_parse_result 失败: HTTP {status}")
+    if parsed.get("code") not in (None, 0):
+        raise RuntimeError(
+            f"元宝解析失败: {parsed.get('msg') or parsed.get('message') or parsed.get('code')}"
+        )
+    data = parsed.get("data") or {}
+    if not data.get("playable_url") and not data.get("wx_export_id"):
+        raise RuntimeError("元宝解析未返回 playable_url 或 wx_export_id")
+    return data
+
+
+def generate_rid():
+    return f"{int(time.time()):x}-" + "".join(random.choice("0123456789abcdef") for _ in range(8))
 
 
 def fetch_feed_info(token, eid):
-    """用 token+eid 获取视频直链"""
-    def gen_rid():
-        return f"{int(time.time()):x}-" + "".join(random.choice("0123456789abcdef") for _ in range(8))
-
-    rid = gen_rid()
+    rid = generate_rid()
     api_url = (
         "https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info"
         f"?_rid={rid}&_pageUrl=https:%2F%2Fchannels.weixin.qq.com%2Ffinder-preview%2Fpages%2Ffeed"
@@ -190,15 +258,251 @@ def fetch_feed_info(token, eid):
         "Content-Type": "application/json",
         "Origin": "https://channels.weixin.qq.com",
         "Referer": referer,
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "User-Agent": DESKTOP_UA,
     }
     req = urllib.request.Request(api_url, data=payload, headers=headers, method="POST")
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=SSL_CONTEXT),
+    )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with opener.open(req, timeout=30) as resp:
             body = resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return None, f"HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:200]}"
-    return json.loads(body), None
+    except urllib.error.URLError as exc:
+        return None, f"网络请求失败: {exc.reason}"
+    try:
+        return json.loads(body), None
+    except json.JSONDecodeError:
+        return None, "get_feed_info 返回不是 JSON"
+
+
+def _coerce_duration(value):
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if num > 10000:
+        num = num / 1000.0
+    if 1 <= num <= 36000:
+        return int(round(num))
+    return 0
+
+
+def extract_duration(feed):
+    data = (feed or {}).get("data") or {}
+    feed_info = data.get("feedInfo") or {}
+    for blob in (
+        feed_info,
+        feed_info.get("h264VideoInfo") or {},
+        feed_info.get("h265VideoInfo") or {},
+        data,
+    ):
+        if not isinstance(blob, dict):
+            continue
+        for key in ("videoPlayLen", "videoDuration", "duration", "playLen", "videoLen"):
+            dur = _coerce_duration(blob.get(key))
+            if dur:
+                return dur
+    return 0
+
+
+def token_eid_from_parse(parsed):
+    playable = parsed.get("playable_url") or ""
+    qs = urllib.parse.parse_qs(urllib.parse.urlparse(playable).query)
+    token = (qs.get("token") or [""])[0]
+    eid = (qs.get("eid") or qs.get("exportId") or [""])[0] or (parsed.get("wx_export_id") or "")
+    return token, eid
+
+
+def profile_from_feed(share_url, feed, resolver="yuanbao-http"):
+    data = (feed or {}).get("data") or {}
+    feed_info = data.get("feedInfo") or {}
+    author_info = data.get("authorInfo") or {}
+    h264 = ((feed_info.get("h264VideoInfo") or {}).get("videoUrl") or "").strip()
+    h265 = ((feed_info.get("h265VideoInfo") or {}).get("videoUrl") or "").strip()
+    base = (feed_info.get("videoUrl") or "").strip()
+    direct = h264 or base or h265
+    author = author_info.get("nickname") or ""
+    desc = feed_info.get("description") or ""
+    title = f"{author}-{desc}" if author else (desc or "weixin_channels_video")
+    return {
+        "platform": "wechat_channels",
+        "title": title,
+        "author": author,
+        "description": desc,
+        "source_url": share_url,
+        "direct_url": direct,
+        "duration": extract_duration(feed),
+        "resolver": resolver,
+        "stats": {
+            "fav": feed_info.get("favCountFmt"),
+            "like": feed_info.get("likeCountFmt"),
+            "forward": feed_info.get("forwardCountFmt"),
+            "comment": feed_info.get("commentCountFmt"),
+        },
+    }
+
+
+def resolve_via_http(share_url, state):
+    cookie = cookie_header_from_state(state)
+    if not cookie:
+        raise RuntimeError("登录态里没有可用 Cookie")
+    if "hy_token" not in cookie and "hy_user" not in cookie:
+        raise RuntimeError("登录态缺少 hy_token/hy_user")
+    user_info = http_get_userinfo(cookie)
+    user_id = _pick_user_id(user_info)
+    parsed = http_parse_share_url(share_url, cookie, user_id)
+    token, eid = token_eid_from_parse(parsed)
+    if not token or not eid:
+        raise RuntimeError("playable_url 缺少 token/eid")
+    feed, err = fetch_feed_info(token, eid)
+    if err or not feed:
+        raise RuntimeError(f"get_feed_info 失败: {err}")
+    profile = profile_from_feed(share_url, feed, resolver="yuanbao-http")
+    if not profile.get("direct_url"):
+        raise RuntimeError("视频号详情没有返回可下载视频流")
+    return profile
+
+
+async def _wait_webapi(page, timeout_ms=10000):
+    try:
+        await page.wait_for_function(
+            "() => !!(window.$webApi && window.$webApi.getYbCommonHeaders "
+            "&& window.$webApi.setContextualRequestHeaders)",
+            timeout=timeout_ms,
+        )
+        return True
+    except Exception:
+        return False
+
+
+async def run_browser_session(headless, storage_state, share_url=None, login_only=False, wait_login=False):
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=headless,
+            args=["--start-maximized"] if not headless else [],
+        )
+        ctx = await browser.new_context(
+            user_agent=DESKTOP_UA,
+            viewport={"width": 1280, "height": 900},
+            storage_state=storage_state,
+        )
+        page = await ctx.new_page()
+        await page.goto(f"{YUANBAO_ORIGIN}/", wait_until="domcontentloaded", timeout=30000)
+        ready = await _wait_webapi(page, 10000)
+        if not ready:
+            await page.wait_for_timeout(2000)
+
+        login = await page.evaluate(LOGIN_JS)
+        if wait_login and not login.get("loggedIn"):
+            for _ in range(24):
+                await page.wait_for_timeout(5000)
+                login = await page.evaluate(LOGIN_JS)
+                if login.get("loggedIn"):
+                    break
+
+        parse_result = None
+        if (not login_only) and share_url and login.get("loggedIn"):
+            parse_result = await page.evaluate(
+                PARSE_JS, {"shareUrl": share_url, "agentId": AGENT_ID}
+            )
+
+        state = None
+        try:
+            state = await ctx.storage_state()
+        except Exception:
+            state = None
+        await browser.close()
+        return {"login": login, "parse": parse_result, "state": state}
+
+
+def check_login_state():
+    state = load_state()
+    cookie = cookie_header_from_state(state)
+    if cookie:
+        try:
+            info = http_get_userinfo(cookie)
+            user_id = _pick_user_id(info)
+            if user_id:
+                return {"ready": True, "loggedIn": True, "via": "http", "userId": user_id}
+        except Exception as exc:
+            log(f"[INFO] HTTP 登录检查失败,回退浏览器: {exc}")
+    result = asyncio.run(run_browser_session(True, state, login_only=True))
+    login = result.get("login") or {}
+    login["via"] = "browser"
+    return login
+
+
+def do_login():
+    result = asyncio.run(
+        run_browser_session(False, None, login_only=True, wait_login=True)
+    )
+    login = result.get("login") or {}
+    state = result.get("state")
+    if login.get("loggedIn") and state:
+        save_state(state)
+        log(f"[OK] 登录态已保存到 {STATE_FILE}")
+        return True
+    log("[错误] 未检测到登录,请扫码后重试")
+    return False
+
+
+def resolve_via_browser(share_url, state):
+    result = asyncio.run(run_browser_session(True, state, share_url=share_url))
+    login = result.get("login") or {}
+    if result.get("state"):
+        try:
+            save_state(result["state"])
+        except Exception:
+            pass
+    if not login.get("loggedIn"):
+        raise RuntimeError("元宝登录态已失效,需要重新执行 sph_resolver.py --login 扫码")
+    parsed_wrap = result.get("parse") or {}
+    if not parsed_wrap.get("ok"):
+        raise RuntimeError(
+            f"解析失败: {parsed_wrap.get('code')} {(parsed_wrap.get('body') or '')[:200]}"
+        )
+    parsed = json.loads(parsed_wrap["body"])
+    data = parsed.get("data") or parsed
+    token, eid = token_eid_from_parse(data)
+    if not token or not eid:
+        raise RuntimeError("playable_url 缺少 token/eid")
+    feed, err = fetch_feed_info(token, eid)
+    if err or not feed:
+        raise RuntimeError(f"get_feed_info 失败: {err}")
+    profile = profile_from_feed(share_url, feed, resolver="yuanbao-browser")
+    if not profile.get("direct_url"):
+        raise RuntimeError("视频号详情没有返回可下载视频流")
+    return profile
+
+
+def resolve_wechat(share_url, prefer_http=True):
+    """解析视频号分享链接,返回含 direct_url/title/duration 的 profile。"""
+    state = load_state()
+    if not state:
+        raise RuntimeError("无登录态,先执行 --login 扫码登录")
+    if prefer_http:
+        try:
+            profile = resolve_via_http(share_url, state)
+            log("[OK] 视频号 HTTP 解析成功")
+            return profile
+        except Exception as exc:
+            log(f"[WARN] HTTP 解析失败({exc}),回退单次浏览器会话")
+    return resolve_via_browser(share_url, state)
+
+
+def parse_share_url(share_url):
+    """兼容旧 CLI:失败返回 None。"""
+    try:
+        profile = resolve_wechat(share_url)
+    except Exception as exc:
+        log(f"[错误] {exc}")
+        return None
+    return {"data": {"playable_url": "", "profile": profile}, "profile": profile}
 
 
 def main():
@@ -213,50 +517,15 @@ def main():
         return 0 if result.get("loggedIn") else 1
 
     if args[0] == "--login":
-        ok = do_login()
-        return 0 if ok else 1
+        return 0 if do_login() else 1
 
     share_url = args[0]
-    parse_result = parse_share_url(share_url)
-    if not parse_result:
+    try:
+        profile = resolve_wechat(share_url)
+    except Exception as exc:
+        log(f"[错误] {exc}")
         return 1
-
-    data = parse_result.get("data") or {}
-    playable_url = data.get("playable_url", "")
-    qs = urllib.parse.parse_qs(urllib.parse.urlparse(playable_url).query)
-    token = (qs.get("token") or [""])[0]
-    eid = (qs.get("eid") or [""])[0]
-    if not token or not eid:
-        print("[错误] playable_url 缺少 token/eid", file=sys.stderr)
-        return 1
-
-    feed, err = fetch_feed_info(token, eid)
-    if err or not feed:
-        print(f"[错误] get_feed_info 失败: {err}", file=sys.stderr)
-        return 1
-
-    feed_data = feed.get("data") or {}
-    feed_info = feed_data.get("feedInfo") or {}
-    author_info = feed_data.get("authorInfo") or {}
-    h264 = (feed_info.get("h264VideoInfo") or {}).get("videoUrl") or ""
-    h265 = (feed_info.get("h265VideoInfo") or {}).get("videoUrl") or ""
-    base = feed_info.get("videoUrl") or ""
-
-    output = {
-        "platform": "wechat_channels",
-        "title": f"{author_info.get('nickname','')}-{feed_info.get('description','')}",
-        "author": author_info.get("nickname", ""),
-        "description": feed_info.get("description", ""),
-        "source_url": share_url,
-        "direct_url": h264 or base or h265,
-        "stats": {
-            "fav": feed_info.get("favCountFmt"),
-            "like": feed_info.get("likeCountFmt"),
-            "forward": feed_info.get("forwardCountFmt"),
-            "comment": feed_info.get("commentCountFmt"),
-        },
-    }
-    print(json.dumps(output, ensure_ascii=False))
+    print(json.dumps(profile, ensure_ascii=False))
     return 0
 
 

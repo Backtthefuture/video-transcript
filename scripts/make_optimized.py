@@ -1,43 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""生成「整理优化版」md + html（通用渲染器，video-transcript skill 配套模板）
+"""生成「整理优化版」md + html
 
 用法:
+  python make_optimized.py --from-md 预整理.md [--patch patch.json] [--output-dir DIR]
   python make_optimized.py --content content.json [--output-dir DIR]
 
-content.json 结构:
-{
-  "title": "高敏感+低能量才是内容创作的圣体（整理优化版）",
-  "source": "微信视频号",
-  "url": "https://weixin.qq.com/sph/xxx",
-  "duration": "21:32",
-  "transcribed_at": "2026-08-07 16:38",
-  "filename": "2026-08-07_妙高山下的老明-高敏感+低能量才是内容创作的圣体_整理优化版",
-  "sections": [
-    {"heading": "开篇：低能量+高敏感=创作圣体", "start": "00:00", "end": "01:00",
-     "paras": ["段落1", "段落2"]}
-  ],
-  "fixes": "已修正(确信度高)：\n- ...\n\n存疑(〔?〕标注)：\n- ..."
-}
-
-工作流（agent 必须遵守）:
-1. 读取落盘 *_transcript.md 全文（stdout 可能截断，以文件为准）
-2. 逐段：补标点断句 + 合并碎句 + 修正识别错误（不确定标〔?〕）+ 语义化小标题
-3. 整理为 content.json（可让脚本 --dump-template 先出骨架）
-4. 跑本脚本 → 生成 .md + .html（工具栏复制/下载 + 目录 + 对照表，样式与旧版一致）
-5. present_files 呈现时 .html 放第一位
+优先 --from-md: agent 只写一次 markdown(或只出小 patch),脚本渲染 html,不再让 LLM 把全文抄进 content.json。
 """
-import argparse, json, html, os, sys, datetime
+import argparse
+import datetime
+import html
+import json
+import os
+import re
+import sys
 
 DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs")
 
+SEC_HEADER_RE = re.compile(
+    r"^##\s*(\d+)[\.、\)\s]\s*(.*?)\s*\[\s*(\d{1,2}:\d{2})\s*[-–~]\s*(\d{1,2}:\d{2})\s*\]\s*$"
+)
+
+
 def esc(s):
-    return html.escape(s, quote=True)
+    return html.escape(s or "", quote=True)
+
 
 def build_md(c):
     lines = []
     lines.append(f"# {c['title']}\n")
-    lines.append(f"> 来源: {c.get('source','视频')} | 链接: {c['url']} | 时长 {c.get('duration','?')} | 转录: FunASR(SenseVoice-Small) {c.get('transcribed_at','?')} | 整理: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    lines.append(
+        f"> 来源: {c.get('source','视频')} | 链接: {c.get('url','')} | 时长 {c.get('duration','?')} | "
+        f"转录: FunASR(SenseVoice-Small) {c.get('transcribed_at','?')} | "
+        f"整理: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    )
     lines.append("> 说明: 在逐字稿基础上补标点、合并碎句、修正识别错误，保留原话原意；个别存疑处标〔?〕，详见文末对照表\n")
     lines.append("## 目录\n")
     for i, s in enumerate(c["sections"], 1):
@@ -45,18 +42,23 @@ def build_md(c):
     lines.append("")
     for i, s in enumerate(c["sections"], 1):
         lines.append(f"## {i}. {s['heading']} [{s['start']} - {s['end']}]\n")
-        for p in s["paras"]:
+        for p in s.get("paras") or []:
             lines.append(p + "\n")
     lines.append("---\n")
     lines.append("## 附：识别修正对照表（整理时改动）\n")
-    lines.append(c.get("fixes", "") + "\n")
+    lines.append((c.get("fixes") or "") + "\n")
     return "\n".join(lines).rstrip() + "\n"
+
 
 def build_html(c, md_text, fn_md):
     art = []
     art.append(f"<h1>{esc(c['title'])}</h1>")
     art.append("<blockquote>")
-    art.append(f"<p>来源: {esc(c.get('source','视频'))} | 链接: {esc(c['url'])} | 时长 {c.get('duration','?')} | 转录: FunASR(SenseVoice-Small) {c.get('transcribed_at','?')} | 整理: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    art.append(
+        f"<p>来源: {esc(c.get('source','视频'))} | 链接: {esc(c.get('url',''))} | 时长 {c.get('duration','?')} | "
+        f"转录: FunASR(SenseVoice-Small) {c.get('transcribed_at','?')} | "
+        f"整理: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    )
     art.append("说明: 在逐字稿基础上补标点、合并碎句、修正识别错误，保留原话原意；个别存疑处标〔?〕，详见文末对照表</p>")
     art.append("</blockquote>")
     art.append("<h2>目录</h2><ol>")
@@ -65,11 +67,11 @@ def build_html(c, md_text, fn_md):
     art.append("</ol>")
     for i, s in enumerate(c["sections"], 1):
         art.append(f"<h2>{i}. {esc(s['heading'])} [{s['start']} - {s['end']}]</h2>")
-        for p in s["paras"]:
+        for p in s.get("paras") or []:
             art.append(f"<p>{esc(p)}</p>")
     art.append("<hr>")
     art.append("<h2>附：识别修正对照表（整理时改动）</h2>")
-    for para in c.get("fixes", "").split("\n\n"):
+    for para in (c.get("fixes") or "").split("\n\n"):
         if para.strip():
             art.append(f"<p>{esc(para).replace(chr(10), '<br>')}</p>")
 
@@ -147,9 +149,221 @@ function flash(msg){{
 </html>
 """
 
+
+def _parse_meta_line(line):
+    meta = {}
+    text = line.lstrip("> ").strip()
+    for part in text.split("|"):
+        part = part.strip()
+        if part.startswith("来源:"):
+            meta["source"] = part.split(":", 1)[1].strip()
+        elif part.startswith("链接:"):
+            meta["url"] = part.split(":", 1)[1].strip()
+        elif part.startswith("时长"):
+            meta["duration"] = part.replace("时长", "", 1).strip()
+        elif "转录:" in part:
+            rest = part.split("转录:", 1)[1].strip()
+            meta["transcribed_at"] = rest.replace("FunASR(SenseVoice-Small)", "").strip()
+    return meta
+
+
+def parse_optimized_md(md_text):
+    lines = (md_text or "").splitlines()
+    title = "整理优化版"
+    meta = {}
+    sections = []
+    fixes_lines = []
+    in_fixes = False
+    current = None
+    para_buf = []
+
+    def flush_para():
+        nonlocal para_buf, current
+        if current is not None and para_buf:
+            text = "\n".join(para_buf).strip()
+            if text:
+                current["paras"].append(text)
+            para_buf = []
+
+    def flush_section():
+        nonlocal current
+        flush_para()
+        if current is not None:
+            sections.append(current)
+            current = None
+
+    for raw in lines:
+        line = raw.rstrip()
+        if line.startswith("# ") and not line.startswith("## "):
+            title = line[2:].strip()
+            continue
+        if line.startswith(">") and not current and not in_fixes:
+            parsed = _parse_meta_line(line)
+            meta.update(parsed)
+            continue
+        if line.startswith("## 目录") or line.startswith("##目录"):
+            continue
+        if line.startswith("## 附") or "识别修正对照表" in line:
+            flush_section()
+            in_fixes = True
+            continue
+        if in_fixes:
+            if line.strip() == "---":
+                continue
+            fixes_lines.append(line)
+            continue
+        m = SEC_HEADER_RE.match(line)
+        if m:
+            flush_section()
+            current = {
+                "heading": m.group(2).strip(),
+                "start": m.group(3),
+                "end": m.group(4),
+                "paras": [],
+            }
+            continue
+        if line.startswith("## "):
+            continue
+        if current is None:
+            continue
+        if line.strip() == "---":
+            flush_section()
+            continue
+        if not line.strip():
+            flush_para()
+        else:
+            para_buf.append(line)
+
+    flush_section()
+    fixes = "\n".join(fixes_lines).strip()
+    return {
+        "title": title,
+        "source": meta.get("source", "视频"),
+        "url": meta.get("url", ""),
+        "duration": meta.get("duration", "?"),
+        "transcribed_at": meta.get("transcribed_at", ""),
+        "sections": sections,
+        "fixes": fixes,
+    }
+
+
+def _fixes_from_patch(patch, existing=""):
+    items = patch.get("fixes")
+    if not items:
+        return existing
+    if isinstance(items, str):
+        return items
+    high, low = [], []
+    for item in items:
+        if isinstance(item, str):
+            high.append(f"- {item}")
+            continue
+        src = item.get("from") or item.get("original") or ""
+        dst = item.get("to") or item.get("fixed") or ""
+        line = f"- {src} → {dst}" if src and dst else f"- {src or dst}"
+        if (item.get("confidence") or "high") == "low":
+            low.append(line)
+        else:
+            high.append(line)
+    parts = []
+    parts.append("**已修正（确信度高）**：")
+    parts.extend(high or ["- （无）"])
+    parts.append("")
+    parts.append("**存疑（〔?〕标注，建议对照原视频核对）**：")
+    parts.extend(low or ["- （无）"])
+    return "\n".join(parts)
+
+
+def _apply_term_fixes(content, patch):
+    items = patch.get("fixes") or []
+    if not isinstance(items, list):
+        return
+    replacements = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if (item.get("confidence") or "high") == "low":
+            continue
+        src = item.get("from") or item.get("original") or ""
+        dst = item.get("to") or item.get("fixed") or ""
+        if src and dst and src != dst:
+            replacements.append((src, dst))
+    if not replacements:
+        return
+    for sec in content.get("sections") or []:
+        paras = sec.get("paras") or []
+        sec["paras"] = [ _replace_all(p, replacements) for p in paras ]
+        if sec.get("heading"):
+            sec["heading"] = _replace_all(sec["heading"], replacements)
+    if content.get("title"):
+        content["title"] = _replace_all(content["title"], replacements)
+
+
+def _replace_all(text, replacements):
+    out = text or ""
+    for src, dst in replacements:
+        out = out.replace(src, dst)
+    return out
+
+
+def apply_patch(content, patch):
+    if not patch:
+        return content
+    if patch.get("title"):
+        content["title"] = patch["title"]
+    headings = patch.get("headings") or []
+    for i, heading in enumerate(headings):
+        if heading and i < len(content["sections"]):
+            content["sections"][i]["heading"] = heading
+    _apply_term_fixes(content, patch)
+    for edit in patch.get("paragraph_edits") or []:
+        try:
+            si = int(edit.get("section") or 1) - 1
+            pi = int(edit.get("para") or 0)
+            repl = edit.get("replace")
+        except (TypeError, ValueError):
+            continue
+        if repl is None:
+            continue
+        if 0 <= si < len(content["sections"]):
+            paras = content["sections"][si].setdefault("paras", [])
+            while len(paras) <= pi:
+                paras.append("")
+            paras[pi] = repl
+    content["fixes"] = _fixes_from_patch(patch, content.get("fixes") or "")
+    return content
+
+
+def default_filename(title):
+    safe = re.sub(r'[\\/:*?"<>|]', "_", title or "整理优化版").strip()
+    date = datetime.datetime.now().strftime("%Y-%m-%d")
+    return f"{date}_{safe[:30]}_整理优化版"
+
+
+def write_outputs(content, out_dir, filename=None):
+    os.makedirs(out_dir, exist_ok=True)
+    filename = filename or content.get("filename") or default_filename(content.get("title"))
+    if filename.endswith(".md"):
+        filename = filename[:-3]
+    fn_md = filename + ".md"
+    fn_html = filename + ".html"
+    md_text = build_md(content)
+    page = build_html(content, md_text, fn_md)
+    md_path = os.path.join(out_dir, fn_md)
+    html_path = os.path.join(out_dir, fn_html)
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(md_text)
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(page)
+    return md_path, html_path, md_text
+
+
 def main():
     ap = argparse.ArgumentParser(description="生成整理优化版 md+html")
-    ap.add_argument("--content", help="content.json 路径")
+    ap.add_argument("--content", help="content.json 路径(旧流程,不推荐)")
+    ap.add_argument("--from-md", dest="from_md", help="预整理/整理优化版 markdown")
+    ap.add_argument("--patch", help="LLM 增量 patch.json,配合 --from-md")
+    ap.add_argument("--filename", default=None, help="输出文件名(不含扩展名)")
     ap.add_argument("--output-dir", default=DEFAULT_OUT)
     ap.add_argument("--dump-template", action="store_true", help="输出 content.json 骨架模板")
     args = ap.parse_args()
@@ -170,28 +384,32 @@ def main():
         print(json.dumps(tpl, ensure_ascii=False, indent=2))
         return
 
+    if args.from_md:
+        with open(args.from_md, encoding="utf-8") as f:
+            content = parse_optimized_md(f.read())
+        if args.patch:
+            with open(args.patch, encoding="utf-8") as f:
+                patch = json.load(f)
+            content = apply_patch(content, patch)
+        if args.filename:
+            content["filename"] = args.filename
+        md_path, html_path, md_text = write_outputs(content, os.path.abspath(args.output_dir), args.filename)
+        print("OK ->", md_path)
+        print("OK ->", html_path)
+        print("MD chars:", len(md_text))
+        return
+
     if not args.content:
-        ap.error("需要 --content content.json（或 --dump-template 看骨架）")
+        ap.error("需要 --from-md 预整理.md(推荐) 或 --content content.json")
 
     with open(args.content, encoding="utf-8") as f:
         c = json.load(f)
 
-    out_dir = os.path.abspath(args.output_dir)
-    os.makedirs(out_dir, exist_ok=True)
-    fn_md = c["filename"] + ".md"
-    fn_html = c["filename"] + ".html"
-
-    md_text = build_md(c)
-    page = build_html(c, md_text, fn_md)
-
-    with open(os.path.join(out_dir, fn_md), "w", encoding="utf-8") as f:
-        f.write(md_text)
-    with open(os.path.join(out_dir, fn_html), "w", encoding="utf-8") as f:
-        f.write(page)
-
-    print("OK ->", os.path.join(out_dir, fn_md))
-    print("OK ->", os.path.join(out_dir, fn_html))
+    md_path, html_path, md_text = write_outputs(c, os.path.abspath(args.output_dir), c.get("filename"))
+    print("OK ->", md_path)
+    print("OK ->", html_path)
     print("MD chars:", len(md_text))
+
 
 if __name__ == "__main__":
     main()
