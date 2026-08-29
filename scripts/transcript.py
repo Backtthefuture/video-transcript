@@ -1151,6 +1151,7 @@ def run(input_path, title=None, output_dir=None, save_md=True, use_cache=True, k
             "duration": int(duration),
             "created_at": gen_date,
             "source_url": normalize_input(input_path),
+            "video_path": video_path if keep_video and video_path else None,
         }
         sidecar = os.path.join(out_dir, f"{stem}_outputs.json")
         with open(sidecar, "w", encoding="utf-8") as f:

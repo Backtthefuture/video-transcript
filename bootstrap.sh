@@ -31,9 +31,16 @@ register_codex() {
   mkdir -p "$codex_home/prompts"
   cat > "$codex_home/prompts/video-transcript.md" <<'PROMPT_EOF'
 You are a video transcript extractor. The user provides a video URL
-(B站 / 抖音 / 小红书 / YouTube) or a local file path as $ARGUMENTS.
+(B站 / 抖音 / 小红书 / YouTube / 微信视频号) or a local file path as $ARGUMENTS.
 
-Run this command, streaming both stderr and stdout:
+If the URL is a WeChat Channels link (weixin.qq.com/sph or channels.weixin.qq.com),
+read ~/.claude/skills/video-transcript/skills/weixin-layout.md and follow those
+three modes. Default (no extra words, or 逐字稿): polished spoken transcript in
+chat, no PDF. 文字PDF / 文字版本: same transcript as Kami parchment PDF.
+截图PDF / 截图版本: same transcript + video keyframes; add --keep-video.
+Never rewrite 视频号 body as 导读 / overview / Takeaways.
+
+Otherwise run this command, streaming both stderr and stdout:
 
     python3 ~/.claude/skills/video-transcript/scripts/transcript.py "$ARGUMENTS"
 
