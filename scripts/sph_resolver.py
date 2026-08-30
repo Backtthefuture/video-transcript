@@ -43,6 +43,28 @@ def log(msg):
     print(msg, file=sys.stderr)
 
 
+class WechatResolverError(RuntimeError):
+    """带稳定错误码和阶段的视频号解析错误。"""
+
+    def __init__(self, code, stage, message):
+        self.code = code
+        self.stage = stage
+        self.message = message
+        super().__init__(f"[{code}] {message}")
+
+    def as_dict(self):
+        return {
+            "ok": False,
+            "code": self.code,
+            "stage": self.stage,
+            "error": self.message,
+        }
+
+
+def resolver_error(code, stage, message):
+    raise WechatResolverError(code, stage, message)
+
+
 LOGIN_JS = r"""
 () => {
   const webApi = window.$webApi;
@@ -226,12 +248,18 @@ def http_parse_share_url(share_url, cookie, user_id=""):
     if status != 200:
         raise RuntimeError(f"get_parse_result 失败: HTTP {status}")
     if parsed.get("code") not in (None, 0):
-        raise RuntimeError(
-            f"元宝解析失败: {parsed.get('msg') or parsed.get('message') or parsed.get('code')}"
+        resolver_error(
+            "WECHAT_PARSE_FAILED",
+            "parse",
+            f"元宝解析失败: {parsed.get('msg') or parsed.get('message') or parsed.get('code')}",
         )
     data = parsed.get("data") or {}
     if not data.get("playable_url") and not data.get("wx_export_id"):
-        raise RuntimeError("元宝解析未返回 playable_url 或 wx_export_id")
+        resolver_error(
+            "WECHAT_PARSE_EMPTY",
+            "parse",
+            "元宝已响应，但没有返回 playable_url 或 wx_export_id；可能是链接失效、内容权限受限或页面接口发生变化",
+        )
     return data
 
 
@@ -348,21 +376,41 @@ def profile_from_feed(share_url, feed, resolver="yuanbao-http"):
 def resolve_via_http(share_url, state):
     cookie = cookie_header_from_state(state)
     if not cookie:
-        raise RuntimeError("登录态里没有可用 Cookie")
+        resolver_error(
+            "WECHAT_AUTH_STATE_INVALID",
+            "auth",
+            "元宝登录态里没有可用 Cookie，请重新执行 sph_resolver.py --login",
+        )
     if "hy_token" not in cookie and "hy_user" not in cookie:
-        raise RuntimeError("登录态缺少 hy_token/hy_user")
+        resolver_error(
+            "WECHAT_AUTH_STATE_INVALID",
+            "auth",
+            "元宝登录态缺少必要字段，请重新执行 sph_resolver.py --login",
+        )
     user_info = http_get_userinfo(cookie)
     user_id = _pick_user_id(user_info)
     parsed = http_parse_share_url(share_url, cookie, user_id)
     token, eid = token_eid_from_parse(parsed)
     if not token or not eid:
-        raise RuntimeError("playable_url 缺少 token/eid")
+        resolver_error(
+            "WECHAT_PARSE_TOKEN_MISSING",
+            "parse",
+            "元宝返回结果缺少 token/eid，无法继续请求视频详情",
+        )
     feed, err = fetch_feed_info(token, eid)
     if err or not feed:
-        raise RuntimeError(f"get_feed_info 失败: {err}")
+        resolver_error(
+            "WECHAT_FEED_FAILED",
+            "feed",
+            f"视频号详情请求失败: {err or '空响应'}",
+        )
     profile = profile_from_feed(share_url, feed, resolver="yuanbao-http")
     if not profile.get("direct_url"):
-        raise RuntimeError("视频号详情没有返回可下载视频流")
+        resolver_error(
+            "WECHAT_STREAM_EMPTY",
+            "stream",
+            "视频号详情已返回，但没有可下载视频流；可能是内容权限、链接状态或接口字段变化",
+        )
     return profile
 
 
@@ -422,18 +470,36 @@ async def run_browser_session(headless, storage_state, share_url=None, login_onl
 
 def check_login_state():
     state = load_state()
+    if not state:
+        return {
+            "ready": True,
+            "loggedIn": False,
+            "via": "local",
+            "authOnly": True,
+            "code": "WECHAT_AUTH_REQUIRED",
+            "message": "未找到元宝登录态，首次使用视频号需执行 sph_resolver.py --login",
+        }
     cookie = cookie_header_from_state(state)
     if cookie:
         try:
             info = http_get_userinfo(cookie)
             user_id = _pick_user_id(info)
             if user_id:
-                return {"ready": True, "loggedIn": True, "via": "http", "userId": user_id}
+                return {
+                    "ready": True,
+                    "loggedIn": True,
+                    "via": "http",
+                    "authOnly": True,
+                    "userId": user_id,
+                }
         except Exception as exc:
             log(f"[INFO] HTTP 登录检查失败,回退浏览器: {exc}")
     result = asyncio.run(run_browser_session(True, state, login_only=True))
     login = result.get("login") or {}
     login["via"] = "browser"
+    login["authOnly"] = True
+    if not login.get("loggedIn"):
+        login.setdefault("code", "WECHAT_AUTH_EXPIRED")
     return login
 
 
@@ -460,23 +526,41 @@ def resolve_via_browser(share_url, state):
         except Exception:
             pass
     if not login.get("loggedIn"):
-        raise RuntimeError("元宝登录态已失效,需要重新执行 sph_resolver.py --login 扫码")
+        resolver_error(
+            "WECHAT_AUTH_EXPIRED",
+            "auth",
+            "元宝登录态已失效，需要重新执行 sph_resolver.py --login 扫码",
+        )
     parsed_wrap = result.get("parse") or {}
     if not parsed_wrap.get("ok"):
-        raise RuntimeError(
-            f"解析失败: {parsed_wrap.get('code')} {(parsed_wrap.get('body') or '')[:200]}"
+        resolver_error(
+            "WECHAT_PARSE_FAILED",
+            "parse",
+            f"元宝浏览器解析失败: {parsed_wrap.get('code')} {(parsed_wrap.get('body') or '')[:200]}",
         )
     parsed = json.loads(parsed_wrap["body"])
     data = parsed.get("data") or parsed
     token, eid = token_eid_from_parse(data)
     if not token or not eid:
-        raise RuntimeError("playable_url 缺少 token/eid")
+        resolver_error(
+            "WECHAT_PARSE_TOKEN_MISSING",
+            "parse",
+            "元宝返回结果缺少 token/eid，无法继续请求视频详情",
+        )
     feed, err = fetch_feed_info(token, eid)
     if err or not feed:
-        raise RuntimeError(f"get_feed_info 失败: {err}")
+        resolver_error(
+            "WECHAT_FEED_FAILED",
+            "feed",
+            f"视频号详情请求失败: {err or '空响应'}",
+        )
     profile = profile_from_feed(share_url, feed, resolver="yuanbao-browser")
     if not profile.get("direct_url"):
-        raise RuntimeError("视频号详情没有返回可下载视频流")
+        resolver_error(
+            "WECHAT_STREAM_EMPTY",
+            "stream",
+            "视频号详情已返回，但没有可下载视频流；可能是内容权限、链接状态或接口字段变化",
+        )
     return profile
 
 
@@ -484,15 +568,36 @@ def resolve_wechat(share_url, prefer_http=True):
     """解析视频号分享链接,返回含 direct_url/title/duration 的 profile。"""
     state = load_state()
     if not state:
-        raise RuntimeError("无登录态,先执行 --login 扫码登录")
+        resolver_error(
+            "WECHAT_AUTH_REQUIRED",
+            "auth",
+            "未找到元宝登录态，先执行 sph_resolver.py --login 扫码登录",
+        )
+    http_error = None
     if prefer_http:
         try:
             profile = resolve_via_http(share_url, state)
             log("[OK] 视频号 HTTP 解析成功")
             return profile
         except Exception as exc:
+            http_error = exc
             log(f"[WARN] HTTP 解析失败({exc}),回退单次浏览器会话")
-    return resolve_via_browser(share_url, state)
+    try:
+        return resolve_via_browser(share_url, state)
+    except WechatResolverError:
+        raise
+    except Exception as browser_exc:
+        if isinstance(http_error, WechatResolverError):
+            raise WechatResolverError(
+                http_error.code,
+                http_error.stage,
+                f"{http_error.message}；浏览器兜底也失败: {browser_exc}",
+            ) from browser_exc
+        resolver_error(
+            "WECHAT_BROWSER_FALLBACK_FAILED",
+            "browser",
+            f"元宝浏览器兜底失败: {browser_exc}",
+        )
 
 
 def parse_share_url(share_url):
@@ -519,12 +624,22 @@ def main():
     if args[0] == "--login":
         return 0 if do_login() else 1
 
-    share_url = args[0]
+    probe_mode = args[0] == "--probe"
+    if probe_mode and len(args) < 2:
+        print("用法: sph_resolver.py --probe <视频号分享链接>", file=sys.stderr)
+        return 2
+    share_url = args[1] if probe_mode else args[0]
     try:
         profile = resolve_wechat(share_url)
     except Exception as exc:
         log(f"[错误] {exc}")
+        if isinstance(exc, WechatResolverError):
+            print(json.dumps(exc.as_dict(), ensure_ascii=False))
+        else:
+            print(json.dumps({"ok": False, "code": "WECHAT_UNKNOWN", "stage": "unknown", "error": str(exc)}, ensure_ascii=False))
         return 1
+    if probe_mode:
+        profile = {"ok": True, **profile}
     print(json.dumps(profile, ensure_ascii=False))
     return 0
 

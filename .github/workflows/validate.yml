@@ -1,0 +1,24 @@
+name: Validate skill
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check shell syntax
+        run: bash -n install.sh bootstrap.sh
+      - name: Compile Python entrypoints
+        run: python -m py_compile scripts/sph_resolver.py scripts/transcript.py scripts/platform_extractor.py
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v

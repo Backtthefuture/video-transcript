@@ -119,15 +119,25 @@ def platform_zh_name(platform):
 
 
 def find_video_download_script():
-    candidates = [
+    candidates = []
+    explicit_home = os.getenv("VIDEO_DOWNLOAD_HOME")
+    if explicit_home:
+        candidates.append(os.path.join(os.path.expanduser(explicit_home), "scripts", "download_video.py"))
+    # 优先使用和当前 video-transcript 同一安装根下的配套副本，避免命中其他运行时的旧版本。
+    candidates.extend([
+        os.path.join(os.path.dirname(SKILL_DIR), "video-download", "scripts", "download_video.py"),
         os.path.join(os.path.expanduser("~"), ".workbuddy", "skills", "video-download", "scripts", "download_video.py"),
         os.path.join(os.path.expanduser("~"), ".agents", "skills", "video-download", "scripts", "download_video.py"),
         os.path.join(os.path.expanduser("~"), ".Codex", "skills", "video-download", "scripts", "download_video.py"),
         os.path.join(os.path.expanduser("~"), ".codex", "skills", "video-download", "scripts", "download_video.py"),
         os.path.join(os.path.expanduser("~"), ".claude", "skills", "video-download", "scripts", "download_video.py"),
-        os.path.join(os.path.dirname(SKILL_DIR), "video-download", "scripts", "download_video.py"),
-    ]
+    ])
+    seen = set()
     for path in candidates:
+        path = os.path.abspath(path)
+        if path in seen:
+            continue
+        seen.add(path)
         if os.path.exists(path):
             return path
     return None
@@ -137,7 +147,7 @@ def _run_video_download_json(args, timeout=900):
     script = find_video_download_script()
     if not script:
         raise RuntimeError("找不到 video-download/scripts/download_video.py")
-    cmd = ["python3", script] + args + ["--json"]
+    cmd = [sys.executable, script] + args + ["--json"]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
         err = ""
@@ -155,9 +165,10 @@ def _run_video_download_json(args, timeout=900):
 
 def download_via_video_download(url):
     args = [url]
-    resolver = os.getenv("VIDEO_DOWNLOAD_WECHAT_RESOLVER")
-    if resolver:
-        args += ["--wechat-resolver", resolver]
+    # video-transcript 的公开发行默认只走本机元宝登录态。旧安装里的
+    # WECHAT_RESOLVER=public-worker 不能覆盖这里，除非用户显式设置本变量。
+    resolver = (os.getenv("VIDEO_DOWNLOAD_WECHAT_RESOLVER") or "yuanbao-login").strip()
+    args += ["--wechat-resolver", resolver or "yuanbao-login"]
     data = _run_video_download_json(args, timeout=1200)
     path = data.get("path")
     if not path or not os.path.exists(path):
@@ -1174,7 +1185,7 @@ def run(input_path, title=None, output_dir=None, save_md=True, use_cache=True, k
     print(json.dumps(outputs, ensure_ascii=False), file=sys.stderr)
 
 
-def doctor():
+def doctor(live_wechat_url=None):
     print("=" * 55)
     print("  🩺 video-transcript 体检")
     print("=" * 55)
@@ -1197,17 +1208,34 @@ def doctor():
     else:
         print("  ⚠ yt-dlp 未安装(YouTube 会受影响)")
     try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            exe = p.chromium.executable_path
-            if exe and os.path.exists(exe):
-                print("  ✓ playwright + chromium")
-            else:
-                print("  ✗ chromium 没装")
-                issues.append("python3 -m playwright install chromium")
+        import playwright  # noqa: F401
+        # Playwright 在部分 Python 3.13 环境里，即使正常 stop 也会向父进程
+        # 泄漏 asyncio 的 TargetClosed 警告；放进短命子进程做路径探测可隔离该噪音。
+        browser_probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os; from playwright.sync_api import sync_playwright; "
+                    "p=sync_playwright().start(); path=p.chromium.executable_path; "
+                    "print('1' if path and os.path.exists(path) else '0'); p.stop()"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if browser_probe.returncode == 0 and browser_probe.stdout.strip().endswith("1"):
+            print("  ✓ playwright + chromium")
+        else:
+            print("  ✗ chromium 没装或无法启动探测")
+            issues.append(f"{sys.executable} -m playwright install chromium")
     except ImportError:
         print("  ✗ playwright 未安装")
         issues.append("pip install playwright")
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        print(f"  ✗ playwright 探测失败: {exc}")
+        issues.append(f"{sys.executable} -m playwright install chromium")
     try:
         import funasr
         print(f"  ✓ funasr({funasr.__version__})")
@@ -1226,11 +1254,41 @@ def doctor():
         print(f"  ✓ video-download: {find_video_download_script()}")
     else:
         print("  ⚠ video-download 未安装(仅影响 --keep-video / 回退下载)")
-    state = os.path.expanduser("~/.workbuddy/credentials/yuanbao_state.json")
-    if os.path.exists(state):
-        print(f"  ✓ 元宝登录态: {state}")
+    try:
+        from sph_resolver import check_login_state, resolve_wechat
+        auth = check_login_state()
+    except Exception as exc:
+        auth = {"loggedIn": False, "code": "WECHAT_AUTH_CHECK_FAILED", "message": str(exc)}
+        resolve_wechat = None
+    if auth.get("loggedIn"):
+        print(f"  ✓ 视频号元宝认证可用({auth.get('via') or 'unknown'}；仅认证检查)")
     else:
-        print("  ⚠ 元宝登录态不存在(视频号需 sph_resolver.py --login)")
+        code = auth.get("code") or "WECHAT_AUTH_REQUIRED"
+        print(f"  ⚠ 视频号元宝认证未就绪: {code}")
+        print("     需要视频号时运行: python3 scripts/sph_resolver.py --login")
+
+    wechat_live_ok = False
+    if live_wechat_url:
+        if detect_platform(live_wechat_url) != "wechat_channels":
+            print("  ✗ --doctor-live 只接受微信视频号分享链接")
+            issues.append("换用 weixin.qq.com/sph 或 channels.weixin.qq.com 链接")
+        elif not auth.get("loggedIn") or resolve_wechat is None:
+            print("  ✗ 视频号真实解析未执行: 元宝认证未就绪")
+            issues.append("先执行 sph_resolver.py --login")
+        else:
+            try:
+                profile = resolve_wechat(live_wechat_url)
+                if not profile.get("direct_url"):
+                    raise RuntimeError("解析结果没有媒体流")
+                title = (profile.get("title") or "未命名视频")[:50]
+                duration = int(profile.get("duration") or 0)
+                print(f"  ✓ 视频号真实解析: {title} ({duration}s)")
+                wechat_live_ok = True
+            except Exception as exc:
+                print(f"  ✗ 视频号真实解析失败: {exc}")
+                issues.append("视频号端到端解析失败")
+    else:
+        print("  ⚠ 视频号端到端未验证(可用 --doctor-live <公开测试链接>)")
     try:
         from asr_daemon import ping
         info = ping(timeout=1)
@@ -1248,7 +1306,10 @@ def doctor():
         for x in issues:
             print(f"     - {x}")
         return 1
-    print("  ✅ 全部就绪")
+    if live_wechat_url and wechat_live_ok:
+        print("  ✅ 全部就绪(含视频号真实解析)")
+    else:
+        print("  ✅ 核心转录依赖就绪；视频号端到端状态见上方")
     return 0
 
 
@@ -1259,6 +1320,8 @@ def main():
     parser.add_argument("--no-save", dest="save_md", action="store_false")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--doctor", action="store_true")
+    parser.add_argument("--doctor-live", metavar="WECHAT_URL",
+                        help="体检并用一个公开视频号链接验证认证→解析→媒体流")
     parser.add_argument("--no-cache", dest="use_cache", action="store_false")
     parser.add_argument("--force", action="store_true", help="忽略缓存,强制重跑")
     parser.add_argument("--keep-video", action="store_true", help="额外保存完整 MP4")
@@ -1273,8 +1336,8 @@ def main():
                         help="转录后保留临时 wav(默认清理,1 小时单集约 115MB)")
     parser.set_defaults(save_md=True, use_cache=True, use_daemon=True)
     args = parser.parse_args()
-    if args.doctor:
-        sys.exit(doctor())
+    if args.doctor or args.doctor_live:
+        sys.exit(doctor(args.doctor_live))
     if not args.input:
         parser.error("缺少 input 参数")
     if args.speakers or args.reformat or (is_url(args.input) and is_podcast_platform(args.input)):
