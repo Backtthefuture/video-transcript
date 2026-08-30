@@ -4,16 +4,37 @@
 
 把视频和播客转成可引用的逐字稿。贴链接就能跑，全程在你电脑上，不需要 API Key。
 
-- **视频**：B 站 / 抖音 / 小红书 / YouTube / 微信视频号 → 带标点、带小标题的整理稿
-- **播客**：小宇宙 / 喜马拉雅 / Apple Podcasts → 自动区分说话人，输出 Markdown + SRT
+- **视频**：B 站 / 抖音 / 小红书 / YouTube / 微信视频号
+- **播客**：小宇宙 / 喜马拉雅 / Apple Podcasts → 自动分开说话人
 - **本地文件**：`mp4` / `m4a` / `mp3` / `wav` 同样能转
 
 > 这个 Skill 是 [黄叔开源系列](https://github.com/Backtthefuture/huangshu) 之一。想系统学 Agent、少一个人摸索，看文末 [加入社群](#加入黄叔和唯庸的-agent-实战社群)。
 
 ---
 
+## 贴链接，你拿到什么
+
+转写在你电脑上跑。B 站 / 抖音 / 小红书 / YouTube 给你带小标题的整理稿。播客再多一份能压字幕的 SRT。
+
+视频号可以选三种交付。三种都是**他怎么说的**，不会改写成概述。
+
+| 你怎么写 | 你拿到什么 |
+|---|---|
+| 什么都不写，或写「逐字稿」 | **默认。** 对话里直接给你整理过的口语稿。不做 PDF |
+| 文字PDF（以前叫「文字版本」） | 同一份口语稿，排成羊皮纸长文 PDF。文件名用视频原标题 |
+| 截图PDF（以前叫「截图版本」） | 同一份口语稿，再配上视频里的关键画面。文件名用视频原标题 |
+
+贴视频号链接，什么都不写，我就把逐字稿直接发你。想要羊皮纸长文就加「文字PDF」；想要边看讲边看屏幕就加「截图PDF」。
+
+PDF 用 [Kami](https://github.com/tw93/Kami) 羊皮纸长文排。文件名用视频原标题（去掉话题标签）。
+
+只想保存 MP4、不要逐字稿，请说明「只下载」，会改走配套的 [`video-download`](https://github.com/Backtthefuture/video-download)。
+
+---
+
 ## 目录
 
+- [贴链接，你拿到什么](#贴链接你拿到什么)
 - [两条链路](#两条链路)
 - [支持的平台](#支持的平台)
 - [安装](#安装)
@@ -35,10 +56,8 @@
 | 何时启用 | 视频链接、本地视频 | 小宇宙 / 喜马拉雅 / Apple 单集；或加 `--speakers` |
 | 引擎 | SenseVoice-Small，大约 6 倍实时 | paraformer + CAM++，大约音频时长的 25% |
 | 说话人 | 不区分 | 自动分离，映射成主持人 / 嘉宾 |
-| 给你的东西 | `*_预整理.md`，再由 agent 整理一版 | `*_逐字稿.md` + `*_逐字稿.srt`，直接能用 |
+| 给你的东西 | 预整理稿，再按平台整理一版。视频号默认把口语稿发在对话里 | `*_逐字稿.md` + `*_逐字稿.srt`，直接能用 |
 | 首次模型 | 约 234MB | 约 1GB（之后走本地缓存） |
-
-只想保存 MP4、不要逐字稿，请说明「只下载」，会改走配套的 [`video-download`](https://github.com/Backtthefuture/video-download)。
 
 ---
 
@@ -107,6 +126,16 @@ python3 ~/.claude/skills/video-transcript/scripts/transcript.py --doctor
 /video-transcript https://www.xiaoyuzhoufm.com/episode/xxxx
 ```
 
+视频号三种写法：
+
+```
+/video-transcript https://weixin.qq.com/sph/xxxx
+/video-transcript https://weixin.qq.com/sph/xxxx 文字PDF
+/video-transcript https://weixin.qq.com/sph/xxxx 截图PDF
+```
+
+第一行什么都不加，就是逐字稿。以前说的「文字版本 / 截图版本 / 逐字稿版本」也还能用。
+
 ### 在终端里
 
 ```bash
@@ -156,6 +185,8 @@ python3 ~/.claude/skills/video-transcript/scripts/sph_resolver.py --check
 那么我的看法是这样的，首先...
 ```
 
+视频号默认把这样的口语稿直接发在对话里。要 PDF 时，正文还是这些话，只是换成羊皮纸长文；截图PDF 再在对应句子旁边插上视频画面。
+
 播客稿按说话人分块，并额外给一条可直接压字幕的 SRT：
 
 ```markdown
@@ -181,7 +212,7 @@ python3 ~/.claude/skills/video-transcript/scripts/sph_resolver.py --check
 | `--host` / `--guest` | 指定主持人 / 嘉宾姓名 |
 | `--reformat` | 复用已有识别结果，只重跑后处理 |
 | `--keep-audio` | 播客模式保留临时 wav（默认转录完就删） |
-| `--keep-video` | 额外留一份 MP4 |
+| `--keep-video` | 额外留一份 MP4（截图PDF 需要） |
 | `--force` | 忽略缓存，整条链路重跑 |
 | `--doctor` | 检查依赖，缺什么说什么 |
 

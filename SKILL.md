@@ -1,15 +1,19 @@
 ---
 name: 视频文案提取
 description: |
-  视频/播客逐字稿提取专家(FunASR 本地转录,无需 API Key)。视频走 SenseVoice-Small(CPU 高速,自带标点);播客/访谈走 paraformer + CAM++ **说话人分离**链路,输出「说话人区块版」逐字稿(主持人/嘉宾自动识别 + 补标点 + 语义分段)。支持 微信视频号 / 抖音 / 小红书 / B站 / YouTube / 小宇宙播客 / 本地视频音频。**视频核心交付为「整理优化版」**(补标点+合并碎句+修正识别错误+语义化小标题+对照表),原始逐字稿仅作内部素材与对照存档,不向用户全文展示。全程在用户电脑后台运行(headless),不弹窗、不要求登录视频网站,离线零成本。
+  视频/播客逐字稿提取专家(FunASR 本地转录,无需 API Key)。视频走 SenseVoice-Small(CPU 高速,自带标点);播客/访谈走 paraformer + CAM++ **说话人分离**链路,输出「说话人区块版」逐字稿(主持人/嘉宾自动识别 + 补标点 + 语义分段)。支持 微信视频号 / 抖音 / 小红书 / B站 / YouTube / 小宇宙播客 / 本地视频音频。
+  **微信视频号三种交付**(规则全文见 skills/weixin-layout.md):默认或「逐字稿/逐字稿版本」=对话里发口语逐字稿,不排PDF;「文字PDF」(旧称文字版本)=同一份口语稿排成Kami羊皮纸长文;「截图PDF」(旧称截图版本)=同一份口语稿+视频关键帧。视频号正文永远是「他怎么说的」(补标点/说话人/专有名词),禁止改写成导读/概述/Takeaways。
+  **B站/抖音/小红书/YouTube 核心交付仍为「整理优化版」**(补标点+合并碎句+修正识别错误+语义化小标题+对照表),原始逐字稿仅作内部素材与对照存档,不向用户全文展示。全程在用户电脑后台运行(headless),不弹窗、不要求登录视频网站,离线零成本。
   触发场景:
   - 用户说"出文案"、"视频文案"、"提取文案"、"文案提取"、"视频文案提取"
-  - 用户说"出逐字稿"、"提取逐字稿"、"转文字"、"视频转文字"
+  - 用户说"出逐字稿"、"提取逐字稿"、"转文字"、"视频转文字"、"逐字稿版本"
+  - 用户说"文字PDF"、"文字版本"、"截图PDF"、"截图版本"(视频号排版)
   - 用户说"听写视频"、"视频字幕"
   - 用户说"主持稿"、"出主持稿"
   - 用户说"播客转文字"、"播客逐字稿"、"区分说话人"、"说话人分离"
   - 用户使用 /video-transcript 命令
-  - **用户贴一个视频链接(微信视频号/抖音/小红书/B站/YouTube)→ 直接开始转录,不询问意图**
+  - **用户贴一个微信视频号链接(weixin.qq.com/sph / channels.weixin.qq.com)→ 直接转录;无额外说明则默认对话交付逐字稿,不排PDF**
+  - **用户贴一个视频链接(抖音/小红书/B站/YouTube)→ 直接开始转录,不询问意图**
   - **用户贴一个播客/音频链接(小宇宙 xiaoyuzhoufm.com/episode/、喜马拉雅 ximalaya.com/sound/、Apple Podcasts)→ 自动走说话人分离链路**
   - **用户贴微博/知乎/西瓜视频/AcFun 等其他链接 → 也直接试转录(yt-dlp 兜底),不要先反问**
   - 用户给本地视频/音频文件路径(mp4/mp3/m4a/wav 等)→ 直接转录
@@ -21,7 +25,10 @@ user-invocable: true
 
 # 视频文案提取专家
 
-> 输入链接 → 解析一次 → 直链提音频(+模型预热并行) → FunASR → 机器预整理 → LLM 只出 patch → 主持稿/整理优化版
+> 输入链接 → 解析一次 → 直链提音频(+模型预热并行) → FunASR → 机器预整理 → 按平台交付
+> 视频号:读 [skills/weixin-layout.md](skills/weixin-layout.md),默认对话交口语稿;文字PDF / 截图PDF 用 Kami 羊皮纸长文
+> B站/抖音/小红书/YouTube:LLM 只出 patch → 主持稿/整理优化版
+> 播客:说话人区块成品,直接交付
 
 ## 阶段 0 · 定位 skill 根目录(第一件事)
 
@@ -61,9 +68,13 @@ VT_PY="${VT_PY:-$HOME/.workbuddy/binaries/python/envs/default/bin/python}"
 
 | 用户行为 | 处理 |
 |---|---|
-| 贴视频链接,无其他说明 | **直接转录,不问** |
+| 贴**微信视频号**链接,无其他说明 | **默认逐字稿**:直接转录,对话里交口语稿,不排 PDF。读 [skills/weixin-layout.md](skills/weixin-layout.md) |
+| 贴视频号 + 「逐字稿」/「逐字稿版本」 | 同上 |
+| 贴视频号 + 「文字PDF」/「文字版本」 | 同一份口语稿 → Kami 羊皮纸文字PDF |
+| 贴视频号 + 「截图PDF」/「截图版本」 | 同一份口语稿 + 视频关键帧 → Kami 羊皮纸截图PDF;转录加 `--keep-video` |
+| 贴 B站/抖音/小红书/YouTube 链接,无其他说明 | **直接转录,不问**,走整理优化版 |
 | 贴播客/音频链接(小宇宙/喜马拉雅/Apple Podcasts) | **直接转录,自动带说话人分离** |
-| 贴链接 + 说「文案/逐字稿/主持稿/转文字」 | 直接转录 |
+| 贴链接 + 说「文案/逐字稿/主持稿/转文字」 | 直接转录;若是视频号,按上一行对应模式 |
 | 明确说「只下载」「保存MP4」「不用转录」 | 走 `video-download` |
 | 只说「处理视频」但没附链接 | 问用户要链接 |
 
@@ -80,6 +91,20 @@ VT_PY="${VT_PY:-$HOME/.workbuddy/binaries/python/envs/default/bin/python}"
 脚本会明确提示改用单集链接 —— 把提示原样转达给用户,别自己瞎猜别的原因。
 
 仅下载时定位 `video-download` 后跑 `download_video.py "<URL>" --json`,不要再进入转录。
+
+## 视频号三种交付(先读这个)
+
+识别到 `weixin.qq.com/sph` 或 `channels.weixin.qq.com` 时,**不要走阶段 4 的「整理优化版 / make_optimized.py」**。先读 [`skills/weixin-layout.md`](skills/weixin-layout.md),按三种模式交付。
+
+| 用户怎么写 | 交付 |
+|---|---|
+| 什么都不写,或「逐字稿」「逐字稿版本」 | **默认。** 整理过的口语逐字稿,发在对话里。不排 PDF |
+| 「文字PDF」(旧称「文字版本」) | 同一份口语稿,Kami 羊皮纸纯文字 PDF。文件名 = 官方标题 |
+| 「截图PDF」(旧称「截图版本」) | 同一份口语稿 + 视频关键帧。文件名 = 官方标题 |
+
+三种共用一份口语正文:补标点、分说话人、改对专有名词。**禁止**把正文改写成导读 / 概述 / Takeaways。封面最多 2–4 句原话金句。
+
+B 站 / 抖音 / 小红书 / YouTube / 播客不受影响,继续走后面的原流程。
 
 ## 阶段 2 · 依赖体检(首次/可疑时)
 
@@ -99,15 +124,21 @@ VT_PY="${VT_PY:-$HOME/.workbuddy/binaries/python/envs/default/bin/python}"
 "$VT_PY" "$VT_HOME/scripts/transcript.py" "<URL或本地路径>"
 ```
 
+视频号「截图PDF」必须留视频文件才能抽帧,加 `--keep-video`:
+
+```bash
+"$VT_PY" "$VT_HOME/scripts/transcript.py" "<视频号链接>" --keep-video
+```
+
 可选:
 
 - `--force` 忽略同 URL 缓存
-- `--keep-video` 额外保存完整 MP4(默认只提音频)
+- `--keep-video` 额外保存完整 MP4(默认只提音频;截图PDF 必加)
 - `--no-daemon` 不用常驻模型(默认会自动拉起 FunASR daemon)
 
 脚本会自动:
 
-0. **缓存** — 同一 URL 已有预整理稿则秒回,你直接进入阶段 4
+0. **缓存** — 同一 URL 已有预整理稿则秒回;视频号去 [skills/weixin-layout.md](skills/weixin-layout.md),其他平台进入阶段 4
 1. **解析一次** — 视频号优先 HTTP(元宝 Cookie),失败才开一次浏览器;B 站/抖音/小红书探测时缓存直链
 2. **并行** — 后台预热 FunASR daemon,同时 ffmpeg 直链提 16k wav(不下完整 MP4)
 3. **转录** — 长视频按 ≤5 分钟切块;有 daemon 则顺序流式写出,无 daemon 则最多 2 进程并行
@@ -122,10 +153,15 @@ stderr 会先打 📊 评估表。**立刻复述给用户**(标题/时长/预估
 
 - `preorganized_path` — 预整理稿(**你的主输入**)
 - `polish_brief_path` — 增量润色任务书
-- `transcript_path` — 原始逐字稿(对照存档,不要在对话里全文展示)
+- `transcript_path` — 原始逐字稿(对照存档;B站等平台不要在对话里全文展示)
+- `video_path` — 仅 `--keep-video` 时有,截图PDF 用它抽帧
 - `stream_dir` — 分块流式目录
 
+**若是微信视频号:到这里停,去 [`skills/weixin-layout.md`](skills/weixin-layout.md)。** 不要进入阶段 4,不要跑 `make_optimized.py`。
+
 ## 阶段 4 · 你(agent)必须做的事:只出 patch,不要重写全文
+
+> 本阶段只给 B 站 / 抖音 / 小红书 / YouTube 等非视频号视频。视频号看 [skills/weixin-layout.md](skills/weixin-layout.md)。
 
 核心交付仍是「整理优化版 / 主持稿」。但机器已经做完分段和合并,**禁止**再把全文抄进 `content.json`,也**禁止**在对话里把同一篇稿子重写两遍。
 
@@ -264,7 +300,7 @@ agent 拿到播客 `*_逐字稿.md` 后:**直接在对话里输出全文**(或�
 | `--output-dir` | 改保存路径 |
 | `--doctor` | 体检 |
 | `--force` / `--no-cache` | 忽略同 URL 缓存 |
-| `--keep-video` | 额外保存 MP4 |
+| `--keep-video` | 额外保存 MP4(视频号截图PDF 必加) |
 | `--no-daemon` | 不使用常驻模型 |
 | `--speakers` | 强制说话人分离模式(小宇宙链接自动启用) |
 | `--host` / `--guest` | 说话人分离模式手动指定主持人/嘉宾姓名 |
@@ -281,3 +317,4 @@ agent 拿到播客 `*_逐字稿.md` 后:**直接在对话里输出全文**(或�
 - 预估耗时:`时长/8 + 15s`(直链音频 + 已预热模型)
 - 热词:`$VT_HOME/.env` 里 `FUNASR_HOTWORD=词1 词2`
 - 全程离线转录,不需要 API Key
+- 微信视频号三种交付见 [skills/weixin-layout.md](skills/weixin-layout.md):默认对话逐字稿;文字PDF / 截图PDF 用 Kami 羊皮纸长文;文件名用视频原标题

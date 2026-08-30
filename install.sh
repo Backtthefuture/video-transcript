@@ -33,7 +33,7 @@ fi
 bar
 printf "${C_BOLD}  🎬 视频逐字稿 Skill 安装向导${C_RESET}\n"
 sep
-echo "  把 B 站/抖音/小红书/YouTube 视频、小宇宙播客自动转成逐字稿"
+echo "  把 B 站/抖音/小红书/YouTube/视频号、小宇宙播客转成逐字稿"
 echo "  全程在你电脑后台跑,不弹窗、不要登录视频网站"
 echo ""
 echo "  接下来 7 步,大约 6-12 分钟:"
