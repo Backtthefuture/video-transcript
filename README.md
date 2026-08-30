@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-把视频和播客转成可引用的逐字稿。贴链接就能跑，全程在你电脑上，不需要 API Key。
+把视频和播客转成可引用的逐字稿。ASR 转录在你电脑上运行，不需要 API Key；链接解析和首次模型下载需要联网。
 
 - **视频**：B 站 / 抖音 / 小红书 / YouTube / 微信视频号
 - **播客**：小宇宙 / 喜马拉雅 / Apple Podcasts → 自动分开说话人
@@ -14,7 +14,7 @@
 
 ## 贴链接，你拿到什么
 
-转写在你电脑上跑。B 站 / 抖音 / 小红书 / YouTube 给你带小标题的整理稿。播客再多一份能压字幕的 SRT。
+转写在你电脑上跑。B 站 / 抖音 / 小红书 / YouTube 给你带小标题的整理稿。播客再多一份能压字幕的 SRT。微信视频号首次使用需要在本机打开腾讯元宝并扫码一次，不需要手工复制 Cookie。
 
 视频号可以选三种交付。三种都是**他怎么说的**，不会改写成概述。
 
@@ -82,7 +82,14 @@ macOS 复制这一行到终端，回车，跟着提示走：
 bash <(curl -fsSL https://raw.githubusercontent.com/Backtthefuture/video-transcript/main/bootstrap.sh)
 ```
 
-它会：把 Skill 装到 `~/.claude/skills/video-transcript/`，检查 ffmpeg，安装 `yt-dlp` / Playwright / Chromium，装 FunASR，并带上视频号配套的 `video-download`。
+它会：把 Skill 装到 `~/.claude/skills/video-transcript/`，检查 ffmpeg，安装 `yt-dlp` / Playwright / Chromium，装 FunASR，并把配套的 `video-download` 放在同一个 skills 根目录。重复执行会从 GitHub main 更新程序文件，同时保留 `.env`、`outputs/` 和本地词表。
+
+要安装到其他 Agent 目录，可显式指定目标，避免机器上出现多份互相遮蔽的副本：
+
+```bash
+VIDEO_TRANSCRIPT_TARGET="$HOME/.agents/skills/video-transcript" \
+  bash <(curl -fsSL https://raw.githubusercontent.com/Backtthefuture/video-transcript/main/bootstrap.sh)
+```
 
 装完后在 Claude Code / Codex 里就可以：
 
@@ -154,14 +161,17 @@ python3 ~/.claude/skills/video-transcript/scripts/transcript.py "<同一输入>"
 <details>
 <summary>微信视频号怎么解析</summary>
 
-公共 Worker 已失效。`install.sh` 第 7 步会引导用微信扫一次码，复用腾讯元宝登录态走官方接口，不导出 Cookie。
+公开安装不再使用 `public-worker`：该地址当前需要额外服务器凭据，普通用户会收到 HTTP 401。`install.sh` 第 7 步会引导微信扫码一次，之后复用本机腾讯元宝登录态；不会把 Cookie 发给第三方 Worker。
 
 之后自己维护：
 
 ```bash
 python3 ~/.claude/skills/video-transcript/scripts/sph_resolver.py --login
 python3 ~/.claude/skills/video-transcript/scripts/sph_resolver.py --check
+python3 ~/.claude/skills/video-transcript/scripts/transcript.py --doctor-live "<公开视频号链接>"
 ```
+
+`--check` 只验证认证，不代表任意链接都能拿到视频流。`--doctor-live` 才会验证“认证 → 分享链接解析 → 视频详情 → 媒体流”，且不会下载或转录。
 
 只下载、不转录，请直接用 [`video-download`](https://github.com/Backtthefuture/video-download)。
 
@@ -215,6 +225,7 @@ python3 ~/.claude/skills/video-transcript/scripts/sph_resolver.py --check
 | `--keep-video` | 额外留一份 MP4（截图PDF 需要） |
 | `--force` | 忽略缓存，整条链路重跑 |
 | `--doctor` | 检查依赖，缺什么说什么 |
+| `--doctor-live <视频号链接>` | 检查依赖并真实验证视频号解析，不下载/转录 |
 
 ---
 
@@ -228,9 +239,13 @@ python3 ~/.claude/skills/video-transcript/scripts/transcript.py --doctor
 |---|---|
 | `--doctor` 报缺依赖 | 重跑 `bash ~/.claude/skills/video-transcript/install.sh` |
 | funasr 未安装 | `pip install funasr torchaudio` |
-| 首次很慢 / 联网失败 | 视频模型约 234MB，播客模型约 1GB，下完以后离线 |
+| 首次很慢 / 联网失败 | 视频模型约 234MB，播客模型约 1GB；模型可离线复用，网络链接仍需联网 |
 | 抖音 / 小红书抓不到 | 平台改版常见，看 [FALLBACK.md](FALLBACK.md) |
 | 视频号找不到 `video-download` | 重跑 `install.sh`，或 `npx skills add Backtthefuture/video-download` |
+| `WECHAT_AUTH_REQUIRED` / `WECHAT_AUTH_EXPIRED` | 运行 `scripts/sph_resolver.py --login`，扫码后重试 |
+| `WECHAT_PARSE_EMPTY` / `WECHAT_PARSE_TOKEN_MISSING` | 登录已通过，但该链接没有可用解析结果；检查链接/内容权限，必要时上传 MP4/MOV |
+| `WECHAT_FEED_FAILED` / `WECHAT_STREAM_EMPTY` | 视频详情阶段没有媒体流；保留完整错误码后提 Issue，或改传本地文件 |
+| 公共 Worker 返回 401 / 1042 | 不要继续请求隐私授权；公开发行只用 `yuanbao-login` |
 | B 站 yt-dlp 报 412 | 会自动改走无头浏览器，可忽略 |
 | 抖音图文笔记 | 只支持视频，不支持图文 |
 | Chromium 找不到 / 下载失败 | `python3 -m playwright install chromium`，国内网络可设代理后重试 |
@@ -242,9 +257,9 @@ python3 ~/.claude/skills/video-transcript/scripts/transcript.py --doctor
 
 ## 隐私
 
-音视频只在你电脑上处理，不上传到第三方，也不需要 API Key。可选热词写在本地 `.env`（已加入 `.gitignore`）。
+ASR 推理和逐字稿文件在你电脑上处理，不上传到第三方，也不需要 API Key。处理网络链接时，分享链接及必要请求会发送给原平台；视频号默认只访问腾讯域名，并复用本机元宝登录态。可选热词写在本地 `.env`（已加入 `.gitignore`）。
 
-第一次使用需要联网下载模型（ModelScope），之后全离线。
+第一次使用需要联网下载模型（ModelScope），之后模型可离线复用；处理网络链接时仍需访问对应平台。
 
 ---
 

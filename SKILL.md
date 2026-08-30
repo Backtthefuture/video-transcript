@@ -1,26 +1,17 @@
 ---
-name: 视频文案提取
-description: |
-  视频/播客逐字稿提取专家(FunASR 本地转录,无需 API Key)。视频走 SenseVoice-Small(CPU 高速,自带标点);播客/访谈走 paraformer + CAM++ **说话人分离**链路,输出「说话人区块版」逐字稿(主持人/嘉宾自动识别 + 补标点 + 语义分段)。支持 微信视频号 / 抖音 / 小红书 / B站 / YouTube / 小宇宙播客 / 本地视频音频。
-  **微信视频号三种交付**(规则全文见 skills/weixin-layout.md):默认或「逐字稿/逐字稿版本」=对话里发口语逐字稿,不排PDF;「文字PDF」(旧称文字版本)=同一份口语稿排成Kami羊皮纸长文;「截图PDF」(旧称截图版本)=同一份口语稿+视频关键帧。视频号正文永远是「他怎么说的」(补标点/说话人/专有名词),禁止改写成导读/概述/Takeaways。
-  **B站/抖音/小红书/YouTube 核心交付仍为「整理优化版」**(补标点+合并碎句+修正识别错误+语义化小标题+对照表),原始逐字稿仅作内部素材与对照存档,不向用户全文展示。全程在用户电脑后台运行(headless),不弹窗、不要求登录视频网站,离线零成本。
-  触发场景:
-  - 用户说"出文案"、"视频文案"、"提取文案"、"文案提取"、"视频文案提取"
-  - 用户说"出逐字稿"、"提取逐字稿"、"转文字"、"视频转文字"、"逐字稿版本"
-  - 用户说"文字PDF"、"文字版本"、"截图PDF"、"截图版本"(视频号排版)
-  - 用户说"听写视频"、"视频字幕"
-  - 用户说"主持稿"、"出主持稿"
-  - 用户说"播客转文字"、"播客逐字稿"、"区分说话人"、"说话人分离"
-  - 用户使用 /video-transcript 命令
-  - **用户贴一个微信视频号链接(weixin.qq.com/sph / channels.weixin.qq.com)→ 直接转录;无额外说明则默认对话交付逐字稿,不排PDF**
-  - **用户贴一个视频链接(抖音/小红书/B站/YouTube)→ 直接开始转录,不询问意图**
-  - **用户贴一个播客/音频链接(小宇宙 xiaoyuzhoufm.com/episode/、喜马拉雅 ximalaya.com/sound/、Apple Podcasts)→ 自动走说话人分离链路**
-  - **用户贴微博/知乎/西瓜视频/AcFun 等其他链接 → 也直接试转录(yt-dlp 兜底),不要先反问**
-  - 用户给本地视频/音频文件路径(mp4/mp3/m4a/wav 等)→ 直接转录
-  - 只有用户明确说"只下载"、"保存MP4"、"下载视频不用转录"时,才走纯下载流程
-  - 已知不支持:Spotify(DRM)、快手 — 脚本会打印具体原因和替代做法,照着转达即可
+name: video-transcript
+description: >
+  视频/播客逐字稿提取 Skill。使用 FunASR 在本机转录（无需 API Key）；视频用
+  SenseVoice-Small，播客/访谈用 paraformer + CAM++ 区分主持人与嘉宾。支持微信视频号、
+  抖音、小红书、B站、YouTube、小宇宙及本地音视频。用户说“出文案/提取文案/出逐字稿/
+  转文字/视频字幕/主持稿/播客转文字/区分说话人”，粘贴上述平台链接，或提供本地媒体文件时使用。
+  视频号默认在对话中交付口语逐字稿；“文字PDF”生成同稿文字版；“截图PDF”加入关键帧，
+  正文不得改写成导读。其他视频平台默认交付整理优化版；播客交付说话人区块版。用户明确说
+  “只下载/保存MP4”时只下载。ASR 在本机运行，但链接解析需要联网；视频号首次使用需在本机
+  扫码登录腾讯元宝。
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep
-user-invocable: true
+metadata:
+  display-name: 视频文案提取
 ---
 
 # 视频文案提取专家
@@ -33,20 +24,22 @@ user-invocable: true
 ## 阶段 0 · 定位 skill 根目录(第一件事)
 
 ```bash
-VT_HOME="$(
-  for d in "$HOME/.workbuddy/skills/video-transcript" \
-           "$HOME/.agents/skills/video-transcript" \
-           "$HOME/.Codex/skills/video-transcript" \
-           "$HOME/.codex/skills/video-transcript" \
-           "$HOME/.claude/skills/video-transcript" \
-           "$(pwd)/.Codex/skills/video-transcript" \
-           "$(pwd)/.claude/skills/video-transcript" \
-           "$(pwd)/skills/video-transcript" \
-           "$HOME/.Codex/plugins/video-transcript/video-transcript" \
-           "$HOME/.claude/plugins/video-transcript/video-transcript"; do
-    [ -f "$d/SKILL.md" ] && echo "$d" && break
-  done
-)"
+if [ -z "${VT_HOME:-}" ]; then
+  VT_HOME="$(
+    for d in "$HOME/.workbuddy/skills/video-transcript" \
+             "$HOME/.agents/skills/video-transcript" \
+             "$HOME/.Codex/skills/video-transcript" \
+             "$HOME/.codex/skills/video-transcript" \
+             "$HOME/.claude/skills/video-transcript" \
+             "$(pwd)/.Codex/skills/video-transcript" \
+             "$(pwd)/.claude/skills/video-transcript" \
+             "$(pwd)/skills/video-transcript" \
+             "$HOME/.Codex/plugins/video-transcript/video-transcript" \
+             "$HOME/.claude/plugins/video-transcript/video-transcript"; do
+      [ -f "$d/SKILL.md" ] && echo "$d" && break
+    done
+  )"
+fi
 export VT_HOME
 echo "VT_HOME=$VT_HOME"
 ```
@@ -114,7 +107,13 @@ B 站 / 抖音 / 小红书 / YouTube / 播客不受影响,继续走后面的原�
 "$VT_PY" "$VT_HOME/scripts/transcript.py" --doctor
 ```
 
-有 ✗ 项就跑 `bash "$VT_HOME/install.sh"`。全 ✓ 才进入阶段 3。
+有 ✗ 项就跑 `bash "$VT_HOME/install.sh"`。核心依赖没有 ✗ 就可以处理本地文件和其他平台。
+
+`--doctor` 只检查依赖和视频号认证,不会冒充真实链路验收。需要验证视频号时,用一个可公开测试的分享链接:
+
+```bash
+"$VT_PY" "$VT_HOME/scripts/transcript.py" --doctor-live "<公开视频号链接>"
+```
 
 ## 阶段 3 · 一条命令跑完下载+转录+预整理
 
@@ -158,6 +157,13 @@ stderr 会先打 📊 评估表。**立刻复述给用户**(标题/时长/预估
 - `stream_dir` — 分块流式目录
 
 **若是微信视频号:到这里停,去 [`skills/weixin-layout.md`](skills/weixin-layout.md)。** 不要进入阶段 4,不要跑 `make_optimized.py`。
+
+视频号失败时按错误码处理,不要把隐私同意误说成技术鉴权:
+
+- `WECHAT_AUTH_REQUIRED` / `WECHAT_AUTH_EXPIRED`:让用户在本机运行 `sph_resolver.py --login`,扫码后重试。
+- `WECHAT_PARSE_EMPTY` / `WECHAT_PARSE_TOKEN_MISSING`:登录已通过,但该分享链接没有得到可用解析结果;说明可能是链接、内容权限或页面接口变化。
+- `WECHAT_FEED_FAILED` / `WECHAT_STREAM_EMPTY`:已经进入视频详情阶段,但没有媒体流;可请用户上传本地 MP4/MOV 继续。
+- **不要自动改用或请求授权使用 `public-worker`**。该服务当前需要额外服务器凭据,不是公开兜底。
 
 ## 阶段 4 · 你(agent)必须做的事:只出 patch,不要重写全文
 
@@ -279,7 +285,9 @@ agent 拿到播客 `*_逐字稿.md` 后:**直接在对话里输出全文**(或�
 | 抖音图文笔记 | 提示仅支持视频 |
 | 平台前端改版 | 看 `$VT_HOME/FALLBACK.md` |
 | 视频号缺登录态 | `"$VT_PY" "$VT_HOME/scripts/sph_resolver.py" --login` |
-| 视频号公共 Worker 1042 | 已默认走元宝 HTTP,无需处理 |
+| `WECHAT_AUTH_REQUIRED` / `WECHAT_AUTH_EXPIRED` | 在本机运行 `sph_resolver.py --login`,扫码后重试 |
+| `WECHAT_PARSE_EMPTY` / `WECHAT_STREAM_EMPTY` | 登录不等于链接可解析;保留错误码,可让用户上传本地 MP4/MOV |
+| 视频号公共 Worker 401 / 1042 | 不再作为公开兜底;使用 `yuanbao-login` |
 | 要保留 MP4 | 给脚本加 `--keep-video`,或走 `video-download` |
 
 视频号解析默认 `yuanbao-login`。`sph_resolver.py` 先抽 Cookie 走 HTTP,失败才开一次浏览器。
@@ -299,6 +307,7 @@ agent 拿到播客 `*_逐字稿.md` 后:**直接在对话里输出全文**(或�
 | `--no-save` | 不落盘 |
 | `--output-dir` | 改保存路径 |
 | `--doctor` | 体检 |
+| `--doctor-live <视频号链接>` | 在体检基础上验证认证→解析→媒体流,不下载/转录 |
 | `--force` / `--no-cache` | 忽略同 URL 缓存 |
 | `--keep-video` | 额外保存 MP4(视频号截图PDF 必加) |
 | `--no-daemon` | 不使用常驻模型 |
@@ -316,5 +325,5 @@ agent 拿到播客 `*_逐字稿.md` 后:**直接在对话里输出全文**(或�
 - 时间戳是段落级,用于章节定位
 - 预估耗时:`时长/8 + 15s`(直链音频 + 已预热模型)
 - 热词:`$VT_HOME/.env` 里 `FUNASR_HOTWORD=词1 词2`
-- 全程离线转录,不需要 API Key
+- ASR 转录在本地运行,不需要 API Key;链接解析和首次模型下载需要联网
 - 微信视频号三种交付见 [skills/weixin-layout.md](skills/weixin-layout.md):默认对话逐字稿;文字PDF / 截图PDF 用 Kami 羊皮纸长文;文件名用视频原标题
