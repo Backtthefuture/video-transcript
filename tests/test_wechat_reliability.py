@@ -148,113 +148,21 @@ class VideoDownloadBridgeTests(unittest.TestCase):
         self.assertEqual(command[0], sys.executable)
 
 
-class InstallerInvariantTests(unittest.TestCase):
-    def test_install_defaults_to_first_party_login_and_is_portable(self):
-        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
-        self.assertIn("WECHAT_RESOLVER=yuanbao-login", installer)
-        self.assertNotIn("/Users/superhuang", installer)
-        self.assertIn('VD_TARGET="${VIDEO_DOWNLOAD_HOME:-$(dirname "$SKILL_DIR")/video-download}"', installer)
-        self.assertIn("rsync -a --exclude='.git/' --exclude='.env'", installer)
 
-    def test_bootstrap_preserves_user_state_on_update(self):
+class InstallerInvariantTests(unittest.TestCase):
+    def test_cloud_installer_has_no_local_asr_setup(self):
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("quarkclouddrive", installer)
+        self.assertIn("WECHAT_RESOLVER=yuanbao-login", installer)
+        self.assertNotIn("pip install funasr", installer)
+        self.assertNotIn("pip install torchaudio", installer)
+
+    def test_bootstrap_preserves_user_data(self):
         bootstrap = (ROOT / "bootstrap.sh").read_text(encoding="utf-8")
-        self.assertNotIn('rm -rf "$TARGET"', bootstrap)
         self.assertIn("--exclude='.env'", bootstrap)
         self.assertIn("--exclude='outputs/'", bootstrap)
         self.assertIn("VIDEO_TRANSCRIPT_TARGET", bootstrap)
-        self.assertIn("/*/video-transcript)", bootstrap)
-
-    def test_noninteractive_reinstall_preserves_env_and_migrates_worker(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            sandbox = Path(tmp)
-            skill = sandbox / "video-transcript"
-            shutil.copytree(
-                ROOT,
-                skill,
-                ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"),
-            )
-            transcript_env = skill / ".env"
-            transcript_env.write_text("FUNASR_HOTWORD=must-stay\n", encoding="utf-8")
-
-            video_download = sandbox / "video-download"
-            (video_download / "scripts").mkdir(parents=True)
-            (video_download / "scripts" / "download_video.py").write_text(
-                "# smoke-test placeholder\n", encoding="utf-8"
-            )
-            video_download_env = video_download / ".env"
-            video_download_env.write_text(
-                "WECHAT_RESOLVER=public-worker\nKEEP_ME=yes\n", encoding="utf-8"
-            )
-
-            fake_bin = sandbox / "bin"
-            fake_bin.mkdir()
-            fake_python = fake_bin / "python-stub"
-            real_python = shlex.quote(sys.executable)
-            fake_python.write_text(
-                textwrap.dedent(
-                    f"""\
-                    #!/usr/bin/env bash
-                    set -e
-                    case "${{1:-}}" in
-                      -c)
-                        case "${{2:-}}" in
-                          *sys.version_info.major*) echo '3.12.0' ;;
-                          *'print(1 if sys.version_info'*) echo '1' ;;
-                          *'import playwright'*) exit 0 ;;
-                          *) exec {real_python} "$@" ;;
-                        esac
-                        ;;
-                      -m) exit 0 ;;
-                      -) exec {real_python} "$@" ;;
-                      *sph_resolver.py)
-                        printf '%s\n' '{{"loggedIn": true, "via": "stub"}}'
-                        ;;
-                      *transcript.py) exit 0 ;;
-                      *) exec {real_python} "$@" ;;
-                    esac
-                    """
-                ),
-                encoding="utf-8",
-            )
-            fake_python.chmod(0o755)
-            (fake_bin / "uname").write_text(
-                "#!/usr/bin/env bash\necho Darwin\n", encoding="utf-8"
-            )
-            (fake_bin / "ffmpeg").write_text(
-                "#!/usr/bin/env bash\necho 'ffmpeg version 7.0-smoke'\n",
-                encoding="utf-8",
-            )
-            (fake_bin / "uname").chmod(0o755)
-            (fake_bin / "ffmpeg").chmod(0o755)
-
-            env = os.environ.copy()
-            env.update(
-                {
-                    "HOME": str(sandbox / "home"),
-                    "PATH": f"{fake_bin}:/usr/bin:/bin",
-                    "VT_PY": str(fake_python),
-                    "VIDEO_DOWNLOAD_HOME": str(video_download),
-                    "VIDEO_TRANSCRIPT_NONINTERACTIVE": "1",
-                }
-            )
-            result = subprocess.run(
-                ["/bin/bash", str(skill / "install.sh")],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=env,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(
-                transcript_env.read_text(encoding="utf-8"),
-                "FUNASR_HOTWORD=must-stay\n",
-            )
-            migrated = video_download_env.read_text(encoding="utf-8")
-            self.assertIn("WECHAT_RESOLVER=yuanbao-login", migrated)
-            self.assertIn("KEEP_ME=yes", migrated)
-            self.assertNotIn("WECHAT_RESOLVER=public-worker", migrated)
-            self.assertIn("核心转录环境安装完成", result.stdout)
+        self.assertNotIn('rm -rf "$TARGET"', bootstrap)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@
 # 用法:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/Backtthefuture/video-transcript/main/bootstrap.sh)
 #
-# 流程: 拉 skill 文件 → 跑 install.sh(装系统依赖 + FunASR 转录引擎)
+# 流程: 拉取云端版 Skill → 检查本地依赖；夸克网盘 Skill 与授权单独安装
 #
 # 拉取顺序: git clone 暂存 → GitHub tarball；更新时保留本机配置和产物
 
@@ -120,9 +120,16 @@ rsync -a \
 ok "程序文件已同步到 $TARGET"
 
 echo ""
-say "进入安装向导(装系统依赖 + FunASR 转录引擎)..."
+say "检查云端版 Skill 的本地依赖..."
 echo ""
-bash "$TARGET/install.sh"
+if command -v python3 >/dev/null 2>&1; then
+  if ! python3 "$TARGET/scripts/transcript.py" --doctor; then
+    warn "仍有依赖未就绪。请阅读 $TARGET/README.md 并按需运行 bash $TARGET/install.sh"
+  fi
+else
+  warn "未找到 Python 3.9+。请先安装，再运行 Skill 的 --doctor。"
+fi
 
 echo ""
 register_codex
+ok "Skill 文件已安装。云端授权与实际取稿需在目标机器上另行验证。"

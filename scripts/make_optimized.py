@@ -19,7 +19,7 @@ import sys
 DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "outputs")
 
 SEC_HEADER_RE = re.compile(
-    r"^##\s*(\d+)[\.、\)\s]\s*(.*?)\s*\[\s*(\d{1,2}:\d{2})\s*[-–~]\s*(\d{1,2}:\d{2})\s*\]\s*$"
+    r"^##\s*(\d+)[\.、\)\s]\s*(.*?)(?:\s*\[\s*(\d{1,2}:\d{2})\s*[-–~]\s*(\d{1,2}:\d{2})\s*\])?\s*$"
 )
 
 
@@ -27,21 +27,28 @@ def esc(s):
     return html.escape(s or "", quote=True)
 
 
+def time_label(section, span=False):
+    if not section.get('start'):
+        return ''
+    return '[' + section['start'] + (' - ' + section['end'] if span and section.get('end') else '') + ']'
+
+
 def build_md(c):
     lines = []
     lines.append(f"# {c['title']}\n")
     lines.append(
         f"> 来源: {c.get('source','视频')} | 链接: {c.get('url','')} | 时长 {c.get('duration','?')} | "
-        f"转录: FunASR(SenseVoice-Small) {c.get('transcribed_at','?')} | "
+        f"转录: {esc(c.get('engine', '来源未标注'))} {esc(c.get('transcribed_at',''))} | "
         f"整理: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
     )
     lines.append("> 说明: 在逐字稿基础上补标点、合并碎句、修正识别错误，保留原话原意；个别存疑处标〔?〕，详见文末对照表\n")
+    lines.append("> 质量: " + c.get("quality_note", "未逐句听校，完整性待核对") + "\n")
     lines.append("## 目录\n")
     for i, s in enumerate(c["sections"], 1):
-        lines.append(f"{i}. {s['heading']} [{s['start']}]")
+        lines.append(f"{i}. {s['heading']} {time_label(s)}")
     lines.append("")
     for i, s in enumerate(c["sections"], 1):
-        lines.append(f"## {i}. {s['heading']} [{s['start']} - {s['end']}]\n")
+        lines.append(f"## {i}. {s['heading']} {time_label(s, span=True)}\n")
         for p in s.get("paras") or []:
             lines.append(p + "\n")
     lines.append("---\n")
@@ -56,17 +63,18 @@ def build_html(c, md_text, fn_md):
     art.append("<blockquote>")
     art.append(
         f"<p>来源: {esc(c.get('source','视频'))} | 链接: {esc(c.get('url',''))} | 时长 {c.get('duration','?')} | "
-        f"转录: FunASR(SenseVoice-Small) {c.get('transcribed_at','?')} | "
+        f"转录: {esc(c.get('engine', '来源未标注'))} {esc(c.get('transcribed_at',''))} | "
         f"整理: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
     )
     art.append("说明: 在逐字稿基础上补标点、合并碎句、修正识别错误，保留原话原意；个别存疑处标〔?〕，详见文末对照表</p>")
+    art.append("<p>质量: " + esc(c.get("quality_note", "未逐句听校，完整性待核对")) + "</p>")
     art.append("</blockquote>")
     art.append("<h2>目录</h2><ol>")
     for i, s in enumerate(c["sections"], 1):
-        art.append(f"<li>{esc(s['heading'])} [{s['start']}]</li>")
+        art.append(f"<li>{esc(s['heading'])} {time_label(s)}</li>")
     art.append("</ol>")
     for i, s in enumerate(c["sections"], 1):
-        art.append(f"<h2>{i}. {esc(s['heading'])} [{s['start']} - {s['end']}]</h2>")
+        art.append(f"<h2>{i}. {esc(s['heading'])} {time_label(s, span=True)}</h2>")
         for p in s.get("paras") or []:
             art.append(f"<p>{esc(p)}</p>")
     art.append("<hr>")
@@ -163,7 +171,13 @@ def _parse_meta_line(line):
             meta["duration"] = part.replace("时长", "", 1).strip()
         elif "转录:" in part:
             rest = part.split("转录:", 1)[1].strip()
-            meta["transcribed_at"] = rest.replace("FunASR(SenseVoice-Small)", "").strip()
+            parts = rest.split(' ', 1)
+            meta['engine'] = parts[0]
+            meta['transcribed_at'] = parts[1] if len(parts) > 1 else ''
+        elif part.startswith(('状态:', '质量:')):
+            meta['quality_note'] = part.split(':',1)[1].strip()
+        elif part.startswith('生成:'):
+            meta['transcribed_at'] = part.split(':',1)[1].strip()
     return meta
 
 
@@ -203,7 +217,7 @@ def parse_optimized_md(md_text):
             continue
         if line.startswith("## 目录") or line.startswith("##目录"):
             continue
-        if line.startswith("## 附") or "识别修正对照表" in line:
+        if line.startswith("## 附"):
             flush_section()
             in_fixes = True
             continue
@@ -242,6 +256,8 @@ def parse_optimized_md(md_text):
         "url": meta.get("url", ""),
         "duration": meta.get("duration", "?"),
         "transcribed_at": meta.get("transcribed_at", ""),
+        "engine": meta.get("engine", "来源未标注"),
+        "quality_note": meta.get("quality_note", "未逐句听校，完整性待核对"),
         "sections": sections,
         "fixes": fixes,
     }
@@ -261,6 +277,8 @@ def _fixes_from_patch(patch, existing=""):
         src = item.get("from") or item.get("original") or ""
         dst = item.get("to") or item.get("fixed") or ""
         line = f"- {src} → {dst}" if src and dst else f"- {src or dst}"
+        if item.get("basis"):
+            line += " ｜依据：" + item["basis"]
         if (item.get("confidence") or "high") == "low":
             low.append(line)
         else:
@@ -387,13 +405,33 @@ def main():
     if args.from_md:
         with open(args.from_md, encoding="utf-8") as f:
             content = parse_optimized_md(f.read())
+        if not content.get('sections'):
+            ap.error('未找到正文段落；请检查输入格式，不生成空白整理稿')
         if args.patch:
             with open(args.patch, encoding="utf-8") as f:
                 patch = json.load(f)
             content = apply_patch(content, patch)
         if args.filename:
             content["filename"] = args.filename
+        if args.patch:
+            from pathlib import Path
+            source = Path(args.from_md).resolve()
+            # Preserve the exact patch beside output for audit; do not mark text as verified.
+            os.makedirs(args.output_dir, exist_ok=True)
+            with open(os.path.join(args.output_dir, (args.filename or default_filename(content.get('title'))) + '_patch.json'), 'w') as audit:
+                json.dump({'source': str(source), 'patch': patch}, audit, ensure_ascii=False, indent=2)
         md_path, html_path, md_text = write_outputs(content, os.path.abspath(args.output_dir), args.filename)
+        # Record rendering separately from cloud acquisition/quality acceptance.
+        from pathlib import Path
+        state_path = Path(args.from_md).resolve().parent / 'state.json'
+        if state_path.is_file():
+            from quark_transcript import atomic, locked
+            with locked(state_path.with_name('task.lock')):
+                state = json.loads(state_path.read_text())
+                if state.get('outputs', {}).get('preorganized_path') == str(Path(args.from_md).resolve()):
+                    state['polish_status'] = 'rendered_pending_review'
+                    state['outputs'].update(optimized_md_path=md_path, optimized_html_path=html_path)
+                    atomic(state_path, state)
         print("OK ->", md_path)
         print("OK ->", html_path)
         print("MD chars:", len(md_text))

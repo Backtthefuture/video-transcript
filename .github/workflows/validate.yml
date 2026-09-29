@@ -19,6 +19,6 @@ jobs:
       - name: Check shell syntax
         run: bash -n install.sh bootstrap.sh
       - name: Compile Python entrypoints
-        run: python -m py_compile scripts/sph_resolver.py scripts/transcript.py scripts/platform_extractor.py
+        run: python -m py_compile scripts/sph_resolver.py scripts/transcript.py scripts/quark_transcript.py scripts/caller_client.py scripts/make_optimized.py scripts/podcast_extractor.py
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
